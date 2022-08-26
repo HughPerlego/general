@@ -1,0 +1,112 @@
+/* identify users - CPC>no books viewed before hand */
+
+/* Set up trial users data from B2C  */
+
+WITH Trial_Users AS (
+SELECT user_id, geo_location, utm_medium, utm_source, referrer_book, converted_subscribed, currently_subscribed, user_region
+FROM analytics_reporting.user_registrations 
+WHERE payment_channel_crude = 'direct'
+AND converted_trial = 'Y'
+AND registration_time >= CAST('2022-01-01' as date)
+AND internal_user = 'N'),
+
+/* pre user_id activity  */
+Pre_Account_Book_Cover_Clicks AS (
+SELECT user_id, COUNT(DISTINCT(book_id)) AS Books_Clicked_On_Pre_Signup
+FROM "reporting_layer"."view_uniqueid_first_userid"
+LEFT JOIN "reporting_layer"."view_pre_user_signup_book_clicks" ON "reporting_layer"."view_pre_user_signup_book_clicks".unique_id = "reporting_layer"."view_uniqueid_first_userid".unique_id
+WHERE user_id IN (SELECT user_id FROM Trial_Users)
+GROUP BY user_id),
+
+/* first land on book page  */
+Pre_Account_Land_Book_Page AS (
+SELECT user_id, COUNT(DISTINCT(book_id)) AS Landed_On_Book_Page
+FROM "reporting_layer"."view_uniqueid_first_userid"
+LEFT JOIN "reporting_layer"."view_pre_user_signup_first_reffered_book" ON "reporting_layer"."view_pre_user_signup_first_reffered_book".unique_id = "reporting_layer"."view_uniqueid_first_userid".unique_id
+WHERE user_id IN (SELECT user_id FROM Trial_Users)
+GROUP BY user_id),
+
+Main_Data_Table AS (
+SELECT Trial_Users.*, Books_Clicked_On_Pre_Signup, Landed_On_Book_Page, 
+       
+       CASE WHEN referrer_book IS NOT NULL THEN 1 ELSE 0 END AS Signup_Via_Book,
+       CASE WHEN Books_Clicked_On_Pre_Signup > 0 AND referrer_book IS NULL AND Landed_On_Book_Page = 0 THEN 1 ELSE 0 END AS Landed_Homepage_Accessed_Book_Signup_Homepage,
+       CASE WHEN Books_Clicked_On_Pre_Signup > 0 AND referrer_book IS NULL AND Landed_On_Book_Page = 1 THEN 1 ELSE 0 END AS Landed_On_Book_Page_Accessed_Another_Book_Signup_Homepage,
+       CASE WHEN Landed_On_Book_Page > 0 AND referrer_book IS NULL AND Books_Clicked_On_Pre_Signup = 0 THEN 1 ELSE 0 END AS Landed_On_Book_Page_Signup_Via_Homepage,
+       
+       CASE WHEN referrer_book IS NOT NULL AND Landed_On_Book_Page > 0 AND (Books_Clicked_On_Pre_Signup = 0 or Books_Clicked_On_Pre_Signup is null) THEN 'Book Page > Signup Via Book'
+            WHEN referrer_book IS NOT NULL AND Landed_On_Book_Page > 0 AND Books_Clicked_On_Pre_Signup > 0 THEN 'Book Page > Access Another Book > Signup Via Book'
+            WHEN referrer_book IS NOT NULL AND (Landed_On_Book_Page = 0 or Landed_On_Book_Page is null) THEN 'Homepage > Signup Via Book'
+            WHEN Books_Clicked_On_Pre_Signup > 0 AND referrer_book IS NULL AND Landed_On_Book_Page = 0 THEN 'Homepage > Book > Signup Via Homepage'
+            WHEN Books_Clicked_On_Pre_Signup > 0 AND referrer_book IS NULL AND Landed_On_Book_Page = 1 THEN 'Book Page > Access Another Book > Signup Via Homepage'
+            WHEN Landed_On_Book_Page > 0 AND referrer_book IS NULL AND Books_Clicked_On_Pre_Signup = 0 THEN 'Book Page > Signup Via Homepage'
+            WHEN referrer_book IS NULL AND (Books_Clicked_On_Pre_Signup = 0 or Books_Clicked_On_Pre_Signup is null) AND (Landed_On_Book_Page = 0 or Landed_On_Book_Page is null) THEN 'No Books Viewed' END AS User_Status,
+            
+        CASE WHEN utm_medium <> 'cpc' and utm_medium <> 'organic' AND utm_medium <> '' THEN 'Other' ELSE utm_medium END AS Grouped_UTM_Medium    
+       
+FROM Trial_Users
+LEFT JOIN Pre_Account_Book_Cover_Clicks ON Pre_Account_Book_Cover_Clicks.user_id = Trial_Users.user_id
+LEFT JOIN Pre_Account_Land_Book_Page ON Pre_Account_Land_Book_Page.user_id = Trial_Users.user_id),
+
+/* filter to cpc users who have not viewed a book before hand - get the trial start date to limit book searchs to within 1 day of the trial start date */
+User_Information_CPC_No_Pre_Books AS (
+select Main_Data_Table.user_id, user_region, user_status, D1_Search_Events, D1_Books_Read,
+       trial_start_time 
+from Main_Data_Table
+left join analytics_reporting.user_conversion_summary ON analytics_reporting.user_conversion_summary.user_id = Main_Data_Table.user_id
+where Main_Data_Table.utm_medium = 'cpc'
+and user_status = 'No Books Viewed'),
+
+User_Searches_D1 AS (
+SELECT User_Information_CPC_No_Pre_Books.*, record_date, 
+       CASE WHEN environment_name = 'Mobile App' THEN json_extract(event_properties, '$.search_term') ELSE json_extract(event_properties, '$.searchTerm') END AS User_Search_Term
+FROM User_Information_CPC_No_Pre_Books 
+INNER JOIN event_tracking ON event_tracking.user_id = User_Information_CPC_No_Pre_Books.user_id
+WHERE record_date <= date_add('day', 1, trial_start_time)
+AND event_name = 'book search'),
+
+Add_lag_Functions AS (
+SELECT *, 
+        LAG(User_Search_Term, 1) OVER (PARTITION BY user_id ORDER BY record_date) AS Previous_Search_term,
+        
+        LAG(record_date, 1) OVER (PARTITION BY user_id ORDER BY record_date) AS Previous_search_date
+
+FROM User_Searches_D1),
+
+Mark_Differences AS (
+SELECT *, 
+        levenshtein_distance(CAST(User_Search_Term as varchar), CAST(Previous_Search_term as varchar)) AS Leveshtein_Diff_Search_terms,
+        date_diff('second', Previous_search_date, record_date) as seconds_after_previous_search,
+        length(CAST(Previous_Search_term as varchar)) as previous_search_term_character_length
+FROM Add_lag_Functions),
+
+Work_Out_Previous_Subset AS (
+SELECT *, CASE WHEN SUBSTR(CAST(User_Search_Term as varchar), 1, CAST(previous_search_term_character_length as int)) = CAST(Previous_Search_term as varchar) THEN 1 ELSE 0 END AS Previous_Search_Subset
+FROM Mark_Differences),
+
+/* mark rules to determine if we have reached the end of the user search pattern - these may be changed later on - marking as part of the same search if 
+1) Previous_Search_Subset = 1 
+2) first search record e.g. leveshtein distance is null 
+3) Previous Search subset = 0 and leveshtein difference <= 5 - as it looks like in these cases a few characters have changed, but the substance of the search term is the same*/
+
+Mark_New_Search AS (
+SELECT *, 
+
+CASE WHEN Leveshtein_Diff_Search_terms IS NOT NULL and Previous_Search_Subset = 0 and Leveshtein_Diff_Search_terms >= 5 THEN 1 ELSE 0 END AS New_Search_Start,
+
+ CASE WHEN lead(Leveshtein_Diff_Search_terms, 1) over (partition by user_id order by record_date) IS NOT NULL AND
+     lead(Previous_Search_Subset, 1) over (partition by user_id order by record_date) = 0 
+     AND 
+     lead(Leveshtein_Diff_Search_terms, 1) over (partition by user_id order by record_date) >= 5 THEN 1 ELSE 0 END AS End_Of_Current_Search
+
+FROM Work_Out_Previous_Subset)
+ 
+/* include new search start and searches just before */
+
+SELECT *
+FROM Mark_New_Search
+WHERE New_Search_Start = 1 or (End_Of_Current_Search = 1 and Previous_Search_term <> User_Search_Term)
+ORDER BY user_id, record_date 
+
+
+
