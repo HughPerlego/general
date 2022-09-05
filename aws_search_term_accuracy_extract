@@ -1,0 +1,328 @@
+/* extract search terms  */
+
+WITH UserID_Searches AS (
+select user_id, record_date, date_add('second', 20, record_date) as search_date_plus_20secs, environment_name,
+       CASE WHEN environment_name = 'Mobile App' THEN json_extract_scalar(event_properties, '$.search_term') ELSE NULL END as mobile_search_term_1,
+       CASE WHEN environment_name <> 'Mobile App' THEN json_extract_scalar(event_properties, '$.searchTerm') ELSE NULL END as web_search_term
+from event_tracking 
+where event_name = 'book search'
+and record_date >= cast('2022-01-01' as date)
+AND user_id is not null),
+
+ UniqueId_Searches AS (
+select unique_id, record_date, date_add('second', 20, record_date) as search_date_plus_20secs ,environment_name,
+       CASE WHEN environment_name = 'Mobile App' THEN json_extract_scalar(event_properties, '$.search_term') ELSE NULL END as mobile_search_term_1,
+       CASE WHEN environment_name <> 'Mobile App' THEN json_extract_scalar(event_properties, '$.searchTerm') ELSE NULL END as web_search_term
+from event_tracking 
+where event_name = 'book search'
+and record_date >= cast('2022-01-01' as date)
+AND user_id is null),
+
+/* lower searches to all lower case and remove . to improve match rate */
+Combined_searchTerms_user_id AS (
+select user_id, record_date, search_date_plus_20secs, lower(CASE WHEN mobile_search_term_1 IS NOT NULL THEN mobile_search_term_1 ELSE web_search_term END) AS Main_Searched_Term 
+from UserID_Searches),
+
+Combined_searchTerms_unique_id AS (
+select unique_id, record_date, search_date_plus_20secs, lower(CASE WHEN mobile_search_term_1 IS NOT NULL THEN mobile_search_term_1 ELSE web_search_term END) AS Main_Searched_Term 
+from UniqueId_Searches),
+
+/* filter to relevant search terms  */
+
+Combined_searchTerms_user_id_filter AS (
+SELECT *
+FROM Combined_searchTerms_user_id
+WHERE Main_Searched_Term IN ('design and application of photocatalysts using porous materials',
+'introduction to criminology',
+'the theory of catalytic surface',
+'wine making book',
+'0rganisational learning roderi',
+'100 best book',
+'978-0190642396',
+'9780357427934',
+'9781352005455',
+'alma',
+'amazon',
+'anatomia y fisiologia',
+'anatomy',
+'apm',
+'applying the kingdom spanish edition',
+'archaeology and buddhism in south asia himanshu prabha ray',
+'architecture',
+'ashes of sin and stardust',
+'atomic habits',
+'bearing the cross david garrow',
+'biologia',
+'biology',
+'book of spells',
+'books on conflict and conflict resolution',
+'brilliant body language',
+'bushido',
+'business communication today',
+'business regulatory framework',
+'bussiness',
+'carbamazepine',
+'carpentry',
+'cat in the hat',
+'cialdini',
+'cima f2',
+'circuit breaker',
+'communication skills for business professionals',
+'corporate finance: a south african perspective',
+'couple relationships',
+'creative art education',
+'criminal justice a brief introduction',
+'criminal law case studies by robinson, paul h.',
+'cub scout',
+'demonolo',
+'deporte',
+'disoccupazione',
+'doing qualitative research in psychology: a practical guide',
+'dp900',
+'ebony',
+'economics for south african students',
+'edexcel geography b book',
+'effective communication',
+'english-medium instruction in higher education in the middle east and north africa',
+'epistemology',
+'everyones an author with readings 3rd edition',
+'fitting',
+'focus on pharmacology 3rd',
+'general management jaa kobus 2020',
+'george orwel',
+'get out of your own way',
+'give me liberty! an american',
+'handbook of contemporary spanish grammar',
+'harry marsman',
+'high voltage testing',
+'hoepli design test',
+'how the emancipation proclamation affected the civil war',
+'how to talk to any one',
+'https://www.perlego.com/search?query=',
+'human design',
+'inter-personal',
+'international entrepreneurship zucchella',
+'interpersonal',
+'introduction human resources management',
+'invertebrate zoology',
+'investments',
+'koppleman, kent l. understanding human difference: multicultural education for a diverse america (si edition). allyn',
+'leadership',
+'leadership: a communication perspective (7th ed.). long grove, il: waverland press.',
+'learn norweigian',
+'literary criticism kate chopin a respectable women',
+'management',
+'manga classics les miserables',
+'manipolazione mentale',
+'marie jahoda',
+'marine biology:',
+'maskew miller longman',
+'math 1',
+'medevial manuscripts',
+'medical law and ethics',
+'mira mthimkhulu the blind',
+'multi agency',
+'myocardium',
+'nanda',
+'nanda 2021 20',
+'network',
+'oakland on quality manage',
+'obiettivo scola secondaria',
+'passion',
+'percy jackson',
+'photopolymer',
+'planetizen',
+'practical guide to interpretive near-infrared spectroscopy',
+'prayer',
+'principles of biostatistics',
+'process optimisation',
+'professional practice: a southern african nursing perspective',
+'public finance',
+'public speaking: choices and responsibility 3rd edition',
+'quantum computing',
+'referendums aro',
+'robinson, paul h.',
+'scott rao',
+'shining',
+'silencing scientists',
+'somerset maugham',
+'sophie kinsella',
+'sport psychology: performance enhancement, performance inhibition, individuals, and teams',
+'sql server administration',
+'squint',
+'steven mccornack',
+'storytelling',
+'taras shevchenko',
+'the magic',
+'the market gardener',
+'the new essential labour law',
+'the oxford handbook',
+'the social work practitioner',
+'the summer i turned pretty',
+'the voice of your soul',
+'trauma',
+'troy',
+'voodo',
+'web 3.0',
+'why fonts matter',
+'witchcraft',
+'words are my matter: writings on life and books by ursula le guin')),
+
+Combined_searchTerms_unique_id_filter AS (
+SELECT *
+FROM Combined_searchTerms_unique_id
+WHERE Main_Searched_Term IN ('la tiganci',
+'3954844087, 9783954844081',
+'80 flle innere medizin',
+'9780415275583',
+'a future for public service television',
+'activity guide grade r language improvement programme',
+'advanced nut',
+'africa and africans in the making of the atlantic',
+'anatomy',
+'animals',
+'aventuras',
+'beschaffung',
+'biological sciences',
+'biomimetic de',
+'blockchain',
+'brand',
+'brand equity',
+'brand loyal',
+'business',
+'career choices and changes',
+'cmake',
+'cobal programming',
+'compendium of biophysics',
+'cooking',
+'corrects in america',
+'cosmology',
+'criminal justice in action',
+'cyberlaw@sa',
+'dao de jing',
+'defence electron',
+'deming',
+'do',
+'effective management for therapeutic',
+'enigma',
+'environmental impact assessment',
+'essentials of lifespan development',
+'ethics in psychology research',
+'exploring early childhood',
+'falò',
+'frequency',
+'genre and television',
+'get a financial life',
+'half the sky: turning oppression into opportunity for women worldwide',
+'he fundamentals of digital fashion marketing - claire harris',
+'health and social care',
+'hepatology',
+'i nuovi nonni',
+'immunology',
+'infomration securitz',
+'intelligence',
+'intimate relationships',
+'isbn-13: 9780367903848',
+'job matching',
+'laser grundlage und anwendung',
+'law of remedies',
+'lawwork',
+'learn french',
+'levine, robert s. the norton anthology of american literature: volume 1. , 2017.',
+'lionel nichola',
+'lon l.',
+'managerial economics',
+'megalithic architecture',
+'mri',
+'nancy caroline',
+'nancy caroline’s emergency care in the streets',
+'nancy holder',
+'othello studyguide',
+'pedriatic epilepsy surgery',
+'phlebotomy essential 7th',
+'physical science',
+'piensa y hagase',
+'project engineer',
+'psychotherapy',
+'psychotherp',
+'rav kook',
+'reducing carbon',
+'revelation',
+'risk management',
+'sea food',
+'self',
+'sherlocks men: masculinity, conan doyle, and cultural history (nineteenth century)',
+'social science: an introduction to the study of society',
+'socjology',
+'sven hassel',
+'symfony 5',
+'television and new media',
+'the alch',
+'the art of the theatre then and now',
+'the black book of financial hacking',
+'the fashion image',
+'the universe has your back',
+'the vampire diaries the awakening',
+'tunisian colloquial arabic vocabulary',
+'understanding news',
+'water pollution practices',
+'we the people')),
+
+
+/* mark successfull matches as book cover click / want to read / read click / open book within 10 seconds of the search being made - view that something will have returned  */
+userid_book_interactions as (
+SELECT user_id, record_date as interaction_date ,1 as interaction, session_id
+FROM event_tracking 
+where user_id in (select user_id from Combined_searchTerms_user_id_filter)
+and event_name IN ('open book', 'add to library', 'book favourited', 'book status added', 'book                  cover click', 'download book')),
+
+worked_out_user_search_success as (
+select Combined_searchTerms_user_id_filter.user_id, Main_Searched_Term, count(*) as session_success
+from Combined_searchTerms_user_id_filter
+INNER join userid_book_interactions on userid_book_interactions.user_id = Combined_searchTerms_user_id_filter.user_id 
+WHERE interaction_date >= record_date and interaction_date <= search_date_plus_20secs
+group by Combined_searchTerms_user_id_filter.user_id, Main_Searched_Term),
+
+/* same for unique id */
+
+uniqueid_book_interactions as (
+SELECT unique_id, record_date as interaction_date ,1 as interaction, session_id
+FROM event_tracking 
+where unique_id in (select unique_id from Combined_searchTerms_unique_id_filter)
+and event_name IN ('open book', 'add to library', 'book favourited', 'book status added', 'book                  cover click', 'download book')),
+
+worked_out_unique_id_search_success as (
+select Combined_searchTerms_unique_id_filter.unique_id, Main_Searched_Term, count(*) as session_success
+from Combined_searchTerms_unique_id_filter
+inner join uniqueid_book_interactions on uniqueid_book_interactions.unique_id = Combined_searchTerms_unique_id_filter.unique_id 
+WHERE interaction_date >= record_date and interaction_date <= search_date_plus_20secs
+group by Combined_searchTerms_unique_id_filter.unique_id, Main_Searched_Term),
+
+/* combine both data sets  */
+
+final_user_id_table as (
+select Combined_searchTerms_user_id_filter.Main_Searched_Term, 
+       count(*) as searches, 
+       sum(session_success) as successfull_searches,
+       'user_id' as user_status
+from Combined_searchTerms_user_id_filter
+left join worked_out_user_search_success on (worked_out_user_search_success.user_id = Combined_searchTerms_user_id_filter.user_id and worked_out_user_search_success.Main_Searched_Term =  Combined_searchTerms_user_id_filter.Main_Searched_Term)
+group by Combined_searchTerms_user_id_filter.Main_Searched_Term),
+
+final_uniqueid_table as (
+select Combined_searchTerms_unique_id_filter.Main_Searched_Term, 
+       count(*) as searches, 
+       sum(session_success) as successfull_searches,
+       'unique_id' as user_status
+from Combined_searchTerms_unique_id_filter
+left join worked_out_unique_id_search_success on (worked_out_unique_id_search_success.unique_id = Combined_searchTerms_unique_id_filter.unique_id and worked_out_unique_id_search_success.Main_Searched_Term =  Combined_searchTerms_unique_id_filter.Main_Searched_Term)
+group by Combined_searchTerms_unique_id_filter.Main_Searched_Term)
+
+
+select *
+from final_user_id_table
+union all 
+select *
+from final_uniqueid_table
+
+
