@@ -1,0 +1,79 @@
+/* Create Week Calendar Table - Filter to start 2019 and current date */
+WITH WeekTable AS
+    (SELECT DATE_DIFF('week', CAST('2020-01-05' AS date), calendar_date) AS WeekNumber,
+       MIN(calendar_date) AS WeekStartDate,
+       MAX(calendar_date) AS WeekEndDate
+FROM "reference_tables"."ref_calendar_day"
+WHERE calendar_date >= CAST('2020-01-05' AS DATE) and calendar_date <= current_date
+GROUP BY DATE_DIFF('week', CAST('2020-01-05' AS date), calendar_date)),
+
+     /* Paid Subscribers -or Active B2B subscribers */
+SubscriberCount AS (
+SELECT WeekTable.*, s.user_id, s.payment_channel, s.start_timestamp, end_timestamp, 
+       ROW_NUMBER() OVER (PARTITION BY user_id, WeekNumber ORDER BY start_timestamp DESC) AS Most_Recent_Sub
+from "analytics_reporting"."subscriptions" AS s
+join WeekTable on
+    (s.start_timestamp between WeekTable.WeekStartDate and WeekTable.WeekEndDate)
+or (s.start_timestamp < WeekTable.WeekStartDate and s.end_timestamp > WeekStartDate)
+WHERE subscription_type = 'subscribed'
+AND (s.payment_channel = 'indirect' or s.paid_months > 0)),
+
+/* Filter out possible duplicates */
+
+SubscriberCount_Filter AS (
+SELECT *
+FROM SubscriberCount
+WHERE Most_Recent_Sub = 1
+),
+
+/* Show count by week */
+Count_By_Week AS (
+SELECT WeekNumber, WeekStartDate, WeekEndDate,
+       SUM(CASE WHEN payment_channel = 'direct' THEN 1 ELSE 0 END) AS B2C_Subscribers,
+       SUM(CASE WHEN payment_channel = 'indirect' THEN 1 ELSE 0 END) AS B2B_Subscribers,
+       COUNT(payment_channel) AS Total_Subscribers,
+       DATE_DIFF('day', WeekStartDate, WeekEndDate) AS DaysInWeek
+FROM SubscriberCount_Filter
+GROUP BY WeekNumber, WeekStartDate, WeekEndDate
+ORDER BY WeekNumber),
+
+/* Mark % change and last full reporting week */
+
+Create_FilterFields AS (
+SELECT Count_By_Week.*,
+       LAG(B2C_Subscribers, 1) over(partition by 1 order by WeekStartDate) AS Previous_Week_B2C,
+       LAG(B2B_Subscribers, 1) over(partition by 1 order by WeekStartDate) AS Previous_Week_B2B,
+       LAG(Total_Subscribers, 1) over(partition by 1 order by WeekStartDate) AS Previous_Total,
+
+       ROUND(100.0*(B2C_Subscribers - LAG(B2C_Subscribers, 1) over(partition by 1 order by WeekStartDate)) / LAG(B2C_Subscribers, 1) over(partition by 1 order by WeekStartDate), 1) AS PercentChange_B2C,
+       ROUND(100.0*(B2B_Subscribers - LAG(B2B_Subscribers, 1) over(partition by 1 order by WeekStartDate)) / LAG(B2B_Subscribers, 1) over(partition by 1 order by WeekStartDate), 1) AS PercentChange_B2B,
+       ROUND(100.0*(Total_Subscribers - LAG(Total_Subscribers, 1) over(partition by 1 order by WeekStartDate)) / LAG(Total_Subscribers, 1) over(partition by 1 order by WeekStartDate), 1) AS PercentChange_All,
+
+       CASE WHEN weeknumber = (select max(weeknumber) from Count_By_Week WHERE DaysInWeek = 6) THEN 1 ELSE 0 END AS LastReportingWeek,
+       CASE WHEN DaysInWeek = 6 THEN 1 ELSE 0 END AS Can_Be_Reported
+
+FROM Count_By_Week
+ORDER BY WeekStartDate),
+
+/* Aggregate the number of paused subscribers per week */
+
+Paused_per_Week AS (
+SELECT WeekNumber, COUNT(DISTINCT("prodgluegoldbuckets3database"."subscriptions_paused".userid)) AS Users_Paused_This_Week
+FROM "prodgluegoldbuckets3database"."subscriptions_paused"
+JOIN WeekTable ON (actualpauseddate between WeekTable.WeekStartDate and WeekTable.WeekEndDate)
+GROUP BY WeekNumber),
+
+Reactivated_per_Week AS (
+SELECT WeekNumber, COUNT(DISTINCT("prodgluegoldbuckets3database"."subscriptions_paused".userid)) AS Users_Reactivated_This_Week
+FROM "prodgluegoldbuckets3database"."subscriptions_paused"
+JOIN WeekTable ON (reactivationdate between WeekTable.WeekStartDate and WeekTable.WeekEndDate)
+GROUP BY WeekNumber)
+
+
+/* rejoin paused & reacitvated total to main data frame */
+
+SELECT Create_FilterFields.*, Users_Paused_This_Week, Users_Reactivated_This_Week
+FROM Create_FilterFields
+LEFT JOIN Paused_per_Week ON Paused_per_Week.WeekNumber = Create_FilterFields.WeekNumber
+LEFT JOIN Reactivated_per_Week ON Reactivated_per_Week.WeekNumber = Create_FilterFields.WeekNumber
+WHERE Can_Be_Reported = 1 AND LastReportingWeek = 1
