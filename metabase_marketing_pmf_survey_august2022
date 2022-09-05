@@ -1,0 +1,153 @@
+WITH Subscriber_User_Ids AS (
+    SELECT user_id, 'Current Subscriber' AS Trial_Sub, start_timestamp AS Subscription_Start_Date,
+           end_timestamp as Subscription_End_Date,
+           subscribed_months,
+           sub_category_name,
+           category_name,
+           billing_frequency,
+           payment_channel,
+           row_number() over (partition by user_id order by start_timestamp) as user_row_rank
+    FROM analytics_reporting.subscriptions s
+    WHERE subscription_type = 'subscribed'
+    AND (end_timestamp >= cast('2022-08-12' as date) OR end_timestamp IS NULL)
+    AND (s.payment_channel = 'indirect' OR s.paid_months > 0)
+),
+
+Trial_User_Ids AS (
+SELECT user_id, 'Trial User' AS Trial_Sub,
+       start_timestamp AS Subscription_Start_Date,
+       end_timestamp as Subscription_End_Date,
+       subscribed_months,
+       sub_category_name,
+       category_name,
+       billing_frequency,
+       payment_channel,
+       row_number() over (partition by user_id order by start_timestamp) as user_row_rank
+    FROM analytics_reporting.subscriptions
+    WHERE subscription_type = 'trial'
+    AND start_timestamp >= cast('2022-07-01' as date) and start_timestamp <= cast('2022-08-12' as date)
+    and user_id not in (select user_id from Subscriber_User_Ids where user_id is not null)
+),
+
+Cancelled_subscribers as (
+    SELECT user_id, 'Churned Subscriber' AS Trial_Sub,
+           start_timestamp AS Subscription_Start_Date,
+           end_timestamp as Subscription_End_Date,
+           subscribed_months,
+           sub_category_name,
+           category_name,
+           billing_frequency,
+           payment_channel,
+           row_number() over (partition by user_id order by start_timestamp) as user_row_rank
+    FROM analytics_reporting.subscriptions s
+    WHERE subscription_type = 'subscribed'
+    AND (end_timestamp >= cast('2022-07-01' as date) and  end_timestamp <= cast('2022-08-12' as date))
+    AND (s.payment_channel = 'indirect' OR s.paid_months > 0)
+    and user_id not in (select user_id from Subscriber_User_Ids where user_id is not null)
+),
+
+Combine_UserIds AS (
+    SELECT *
+    FROM Subscriber_User_Ids
+    WHERE user_row_rank = 1
+    UNION
+    SELECT *
+    FROM Trial_User_Ids
+    WHERE user_row_rank = 1
+    UNION
+    SELECT *
+    FROM Cancelled_subscribers
+    WHERE user_row_rank = 1
+    ),
+
+/* Main Data Table */
+Main_Data_Table AS (
+    SELECT Combine_UserIds.user_id, Trial_Sub, user_region, payment_channel ,users.country, email, date_joined, industry, role, university, course, last_active,
+    marketing_conset, prodgluegoldbuckets3database.users.year_of_graduation, prodgluegoldbuckets3database.users.study_level, institution, prodgluegoldbuckets3database.users.user_persona,
+    DATE_DIFF('day', last_active,current_date) AS Days_Since_Login, subscribed_months, Subscription_End_Date,
+           Subscription_Start_Date, partner_organisation_country, acquisition_region
+    FROM Combine_UserIds
+    LEFT JOIN prodgluegoldbuckets3database.users ON Combine_UserIds.user_id = prodgluegoldbuckets3database.users.id
+    LEFT JOIN analytics_reporting.user_registrations ON analytics_reporting.user_registrations.user_id = Combine_UserIds.user_id
+    WHERE internal_user = 'N'
+    ),
+
+/* Books Opened */
+Books_Opened_30_Days AS (
+SELECT user_id, COUNT(*) AS Books_Open_30day
+    FROM analytics_reporting.reading_activity_daily
+    WHERE user_id IN (SELECT user_id FROM Main_Data_Table)
+    AND DATE_DIFF('day', reading_date, cast('2022-08-12' as date)) <= 30
+    GROUP BY user_id
+    ),
+
+
+Books_Opened_90_Days AS (
+SELECT user_id, COUNT(*) AS Books_Open_90day
+    FROM analytics_reporting.reading_activity_daily
+    WHERE user_id IN (SELECT user_id FROM Main_Data_Table)
+    AND DATE_DIFF('day', reading_date, CAST('2022-08-12' as date)) <= 90
+    GROUP BY user_id
+    ),
+
+ Main_Table_Books_Opened AS (
+SELECT Main_Data_Table.*, Books_Open_30day, Books_Open_90day
+FROM Main_Data_Table
+LEFT JOIN Books_Opened_30_Days ON Books_Opened_30_Days.user_id = Main_Data_Table.user_id
+LEFT JOIN Books_Opened_90_Days ON Books_Opened_90_Days.user_id = Main_Data_Table.user_id),
+
+/* In book events */
+
+Book_events_30days AS (
+    SELECT user_id, count(*) AS In_Book_Events_30day
+    FROM analytics_reporting.user_tracking_events
+    WHERE user_id in (select user_id from Main_Table_Books_Opened)
+    AND event_name in ('open Book', 'highlight clicked', 'create highlight',
+                         'annotation created', 'annotation navigation',
+                         'reference copied to clipboard - APA7', 'Reference copied to clipboard - HARVARD',
+                         'reference copied to clipboard - VANCOUVER', 'book shared', 'bookmark created',
+                             'book favourite added', 'create bookmark', 'font size change', 'change font size', 'find in book tab opening')
+    AND date_diff('day', event_timestamp, cast('2022-08-12' as date)) <= 30
+    GROUP BY user_id
+),
+
+Book_events_90days AS (
+    SELECT user_id, count(*) AS In_Book_Events_90day
+    FROM analytics_reporting.user_tracking_events
+    WHERE user_id in (select user_id from Main_Table_Books_Opened)
+      AND event_name in ('open Book', 'highlight clicked', 'create highlight',
+                         'annotation created', 'annotation navigation',
+                         'reference copied to clipboard - APA7', 'Reference copied to clipboard - HARVARD',
+                         'reference copied to clipboard - VANCOUVER', 'book shared', 'bookmark created',
+                             'book favourite added', 'create bookmark', 'font size change', 'change font size', 'find in book tab opening')
+      AND date_diff('day', event_timestamp, cast('2022-08-12' as date)) <= 90
+    GROUP BY user_id
+)
+
+SELECT Main_Table_Books_Opened.user_id, Trial_Sub,
+       CASE WHEN payment_channel = 'direct' THEN 'B2C'
+            WHEN payment_channel = 'indirect' THEN 'B2B'
+            ELSE NULL END AS Subscriber_Type,
+       subscribed_months,
+       Subscription_Start_Date,
+       Subscription_End_Date,
+       case when country is not null then country else partner_organisation_country end as Country_User,
+       case when user_region is not null then user_region else acquisition_region end as User_Region_User,
+       Books_Open_30day,
+       Books_Open_90day,
+       In_Book_Events_30day,
+       In_Book_Events_90day,
+       Days_Since_Login,
+       email,
+       user_persona,
+       study_level,
+       institution,
+       year_of_graduation,
+       role,
+       industry
+FROM Main_Table_Books_Opened
+LEFT JOIN Book_events_30days ON Book_events_30days.user_id = Main_Table_Books_Opened.user_id
+LEFT JOIN Book_events_90days ON Book_events_90days.user_id = Main_Table_Books_Opened.user_id
+WHERE email NOT LIKE '%Perlego%'
+
+
