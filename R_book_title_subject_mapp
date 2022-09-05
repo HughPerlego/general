@@ -1,0 +1,86 @@
+setwd("/Users/hughwaters/Documents/Ad Hoc Data/Book Title Value Project/Subject Mapping")
+
+library(dplyr)
+library(readxl)
+library(reshape2)
+library(tidyr)
+library(stringr)
+
+# Data Import -------------------------------------------------------------
+
+VitaSource <- read_xlsx('vitalsource_categories.xlsx')
+
+Grouped_Data <-  VitaSource %>% unite("All_Groups", CAT1:CAT24, sep = "--", na.rm = TRUE)
+
+# lower all the text to lower case - remove special characters as well 
+
+Grouped_Data$All_Groups <- tolower(Grouped_Data$All_Groups)
+
+# Assign Subject   ---------------------------------------------------------
+
+# See if subject is in one of the groups - if so then they can be assigned to the relevant discipline 
+# can also use to start identifying subject specific words to keep building up the list
+
+# Humanities
+
+Humanities_Key_Words <- c('Art','Education','History','Languages', 'Linguistics','Law',
+                          'Literature','Media & Performing Arts', 'Personal Development',
+                          'Philosophy','Politics', 'International Relations','Study Aids',
+                          'Theology & Religion', 'political', 'poetry', 'fiction', 'judaism',
+                          'christanity', 'islam', 'musicians', 'creative writing', 'religion',
+                          'french', 'christian', 'botany', 'journalists', 'spanish',
+                          'spiritual growth', 'catholic', 'sexuality', 'chinese', 'gender studies',
+                          'italian', 'womens studies', 'german', 'japanese', 'jesus', 'shakespeare',
+                          'personal memoirs', 'religion', 'music', 'self-help', 'travel', 'literary',
+                          'photography', 'drama', 'film', 'irish', 'buddhism', 'biblical', 'french',
+                          'native-american', 'transportation', 'religious', 'hobbies',
+                          'aromatherapy', 'celtic', 'woodworking', 'fashion', 'sewing',
+                          'antiques', 'recreation', 'arabic', 'hebrew', 'jewish', 
+                          'meditation', 'latin', 'alternative therapies', 'astrology',
+                          'royalty', 'witchcraft')
+
+Humanities_Key_Words <- tolower(Humanities_Key_Words)
+
+MainData_String <- Grouped_Data$All_Groups
+
+Grouped_Data$Humanities_Binary <- apply(sapply(X = Humanities_Key_Words, FUN = grepl, MainData_String), MARGIN =  1, FUN = any)
+
+# Social Sciences 
+
+Social_Science_Key_Words <- c('Social Sciences', 'Business', 'Economics', 'Psychology',
+                              'criminology', 'social science', 'social work', 'media studies',
+                              'currency', 'banking', 'Geography', 'Population', 'Diversity',
+                              'Societies')
+
+Social_Science_Key_Words <- tolower(Social_Science_Key_Words)
+
+Grouped_Data$Social_Binary <- apply(sapply(X = Social_Science_Key_Words, FUN = grepl, MainData_String), MARGIN =  1, FUN = any)
+
+# STEM 
+
+STEM_Key_Words <- c('Architecture','Biological Sciences','Computer Science','Design',
+                    'Mathematics', 'Medicine','Physical Sciences','Technology & Engineering',
+                    'medical', 'pharmacology', 'technology', 'engineering', 'dental hygiene',
+                    'physics', 'biology', 'chemistry', 'software', 'statistics', 'algebra',
+                    'computers', 'zoology', 'ecology', 'astronomy', 'environmental science',
+                    'anthropology', 'life sciences', 'insects', 'thermodynamics', 'mechanics',
+                    'Programming', 'Nursing', 'Digital Media', 'Hardware', 'Alternative Medicine','
+                    Data Processing', 'Materials Science', 'Chemical & Biochemical Engineering',
+                    'Genetics', 'food science', 'diet', 'nutrition', 'paleontology', 'first aid',
+                    'diets', 'pregnancy', 'sleep')
+
+STEM_Key_Words <- tolower(STEM_Key_Words)
+
+Grouped_Data$STEM_Binary <- apply(sapply(X = STEM_Key_Words, FUN = grepl, MainData_String), MARGIN =  1, FUN = any)
+
+# Overall 
+
+Grouped_Data <- mutate(Grouped_Data, Academic_Discipline = ifelse(STEM_Binary == T, 'STEM', 'Unknown'),
+                       Academic_Discipline = ifelse(STEM_Binary == F & Social_Binary == T, 'Social Sciences', Academic_Discipline),
+                       Academic_Discipline = ifelse(STEM_Binary == F & Social_Binary == F & Humanities_Binary == T, 'Humanities', Academic_Discipline))
+
+Grouped_Data <- select(Grouped_Data, URL, Academic_Discipline)
+
+group_by(Grouped_Data, Academic_Discipline) %>% summarise(b = n())
+
+write.csv(Grouped_Data, 'Data_Discipline_Added.csv')
