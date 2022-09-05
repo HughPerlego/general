@@ -1,0 +1,16 @@
+SELECT academic_institution, 
+       SUM(CASE WHEN converted_trial = 'Y' THEN 1 ELSE 0 END) AS Trial_Users,
+       SUM(CASE WHEN currently_trialling = 'Y' THEN 1 ELSE 0 END) AS Currently_A_Trial_User,
+       SUM(CASE WHEN converted_subscribed = 'Y' THEN 1 ELSE 0 END) AS Subscribed,
+       100.0*(SUM(CASE WHEN converted_subscribed = 'Y' THEN 1 ELSE 0 END)) / SUM(CASE WHEN converted_trial = 'Y' THEN 1 ELSE 0 END) AS TTP, 
+       SUM(CASE WHEN converted_paid = 'Y' THEN 1 ELSE 0 END) AS Paying_Subscriber,
+       100.0*(SUM(CASE WHEN converted_paid = 'Y' THEN 1 ELSE 0 END)) / SUM(CASE WHEN converted_trial = 'Y' THEN 1 ELSE 0 END) AS TTP_Paid, 
+       SUM(CASE WHEN currently_subscribed = 'Y' THEN 1 ELSE 0 END) AS Currently_Subscribed,
+       100.0*(SUM(CASE WHEN currently_subscribed = 'Y' THEN 1 ELSE 0 END)) / SUM(CASE WHEN converted_subscribed = 'Y' THEN 1 ELSE 0 END) AS Still_Subscribed
+FROM analytics_reporting.user_registrations 
+WHERE academic_institution IS NOT NULL 
+AND academic_institution <> ''
+AND payment_channel_crude = 'direct'
+AND {{Academic_Institution}}
+GROUP BY academic_institution
+ORDER BY Trial_Users DESC 
