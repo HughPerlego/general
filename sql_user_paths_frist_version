@@ -1,0 +1,186 @@
+/* mark users of interest */
+WITH top_users AS (
+SELECT user_id
+FROM reporting.user_registrations
+WHERE country = 'united kingdom'
+  and payment_channel_crude = 'direct'
+AND registration_time >= '2021-12-01' and registration_time < '2022-04-01'),
+
+/* find time trial started and add one hour to it  */
+Subscription_Sessions AS (
+SELECT user_id, min(record_date) as trial_start_time
+FROM prod.event_tracking
+WHERE user_id IN (SELECT user_id FROM top_users)
+and event_name = 'subscription creation'
+group by user_id),
+
+     /* mark event intitials and lagged searched terms - also strip out perlego.com from url to help identify when page view changes  */
+User_First_Sessions AS (
+SELECT unique_id, session_id, prod.event_tracking.user_id, current_url,
+       event_name, event_properties, record_date,
+       regexp_count(event_name, ' ') + 1 AS Event_word_count,
+       CASE WHEN is_valid_json(event_properties) = TRUE THEN json_extract_path_text(event_properties, 'bookId') ELSE NULL END AS BookId,
+       CASE WHEN event_name = 'book search' and is_valid_json(event_properties) = TRUE THEN json_extract_path_text(event_properties, 'searchTerm') ELSE NULL END AS Searched_Term,
+       REPLACE(current_url, 'https://www.perlego.com/', '') AS Stripped_URL,
+      case when is_valid_json(event_properties) = TRUE then json_extract_path_text(event_properties, 'location') else null end AS Open_Book_Location
+FROM prod.event_tracking
+LEFT JOIN Subscription_Sessions ON Subscription_Sessions.user_id = prod.event_tracking.user_id
+WHERE prod.event_tracking.user_id is not null
+  and record_date >= trial_start_time
+    and record_date < dateadd(hour, 1, trial_start_time)),
+
+/* need to group search terms to cut down on number of searches  */
+
+Search_Difference AS (
+select *, LAG(Searched_Term, 1) over (order by user_id, record_date) AS Lag_Book_Search,
+       CASE WHEN Searched_Term IS NOT NULL AND LAG(Searched_Term, 1) over (order by user_id, record_date) IS NOT NULL
+            THEN difference(Searched_Term, LAG(Searched_Term, 1) over (order by user_id, record_date)) ELSE -1 END AS Search_Diff
+from User_First_Sessions),
+
+    /* Page View Difference  */
+
+Current_URL_Difference AS (
+select *, LAG(Stripped_URL, 1) over (order by user_id, record_date) AS Lag_URL,
+       CASE WHEN event_name = 'page view' AND LAG(event_name, 1) over (order by user_id, record_date) = 'page view'
+            THEN difference(Stripped_URL, LAG(Stripped_URL, 1) over (order by user_id, record_date)) ELSE -1 END AS URL_Diff
+from Search_Difference),
+
+/* search diff less than 3 then a another search has been made - filter out all duplicate search events
+   also remove close book events as they are not triggered by the user
+   alsp convert event name to lower case to align with mobile events*/
+
+Filter_Records AS (
+select user_id, Stripped_URL, lower(event_name) as event_name, record_date, Event_word_count, Searched_Term, Search_Diff, URL_Diff,
+       row_number() over (partition by user_id order by record_date) AS User_Event_Number, Open_Book_Location, BookId
+from Current_URL_Difference
+where Search_Diff < 3 and URL_Diff < 3
+and (event_name <> 'close book' and event_name <> 'book closing')),
+
+/* mark events to group them together - make it easier to report the results  */
+
+     Grouped_event_names as (
+SELECT *,
+            CASE WHEN event_name IN ( 'account creation', 'subscription creation attempted',
+                                   'plan selection', 'open settings', 'start trial button click', 'language selection',
+                                   'reactivation button click', 'discount applied', 'marketing consent change') THEN 'Account Info'
+
+                WHEN  event_name IN ('question completed') THEN 'Onboarding Question'
+
+                WHEN event_name IN ('subscription cancellation', 'cancellation answer',
+                                    'retention strategy applied') THEN 'Subscription Cancel'
+
+                WHEN event_name IN ('blur reader', 'open book', 'focus reader', 'page load', 'chapter load',
+                                    'next page', 'read button click', 'book menu tab opening', 'find in book tab opening',
+                                    'chapter click from within book', 'open book menu', 'previous page', 'chapter navigation',
+                                    'retry download', 'open epub book menu', 'download book', 'download book started', 'open chapter tab'
+                                    'read online book clicked', 'open pdf beta modal', 'chapter navigation button click - hamburger menu',
+                                   'page loaded', 'chapter click from within toc menu', 'reader onblur','reader onfocus',
+                                   'next button click', 'chapter loaded', 'book opening', 'book closing') THEN 'Reading'
+
+                WHEN event_name IN ('book cover click', 'book card click', 'about book') THEN 'book cover click'
+
+                WHEN event_name IN ('book status added', 'book status removed', 'delete book', 'renew expired book',
+                                    'add to library', 'book favourited', 'reading list shared', 'reading list favourite removed') THEN 'Book Status / Library'
+
+                WHEN event_name IN ('open app','log in','log out','open app menu') THEN 'Login / Out'
+
+                WHEN event_name IN ('page view', 'open toc', 'open FAQ', 'contact us', 'open report issue') THEN 'Page View'
+
+                WHEN event_name IN ('highlight creation', 'copy text', 'bookmark creation', 'font size change',
+                                    'tab selection', 'reference tab opening', 'open highlights tab', 'bookmarks tab opening',
+                                    'book reference copied', 'highlight removal', 'change highlight colour', 'annotations tab clicked',
+                                    'open font menu', 'bookmark removal', 'highlight creation failure', 'eye saver mode change', 'font family change',
+                                    'annotation navigation', 'book shared', 'reading list card click', 'annotation creation',
+                                    'bookmark navigation', 'favourite removed', 'reading list favourite added', 'annotation removal',
+                                   'highlight created', 'bookmark created', 'change font size', 'change eye saver mode', 'create highlight') THEN 'Reading'
+
+                WHEN event_name IN  ('book search', 'filter selection', 'topic card click', 'subtopic card click',
+                                     'publisher card click', 'search all results','search available books') THEN 'Search'
+
+                WHEN event_name IN ('workspace book added', 'workspace created', 'workspace book removed', 'workspace edited',
+
+                                    'workspace deleted', 'workspace shared', 'workspace book edited') THEN 'Workspace'
+
+                 WHEN event_name = 'subscription creation' THEN 'subscription creation' ELSE 'Other' END AS Grouped_Event_Name
+FROM Filter_Records),
+
+/* add in user status - mark duplicate page views at same time as another event for each user - to simply
+   sequence process*/
+
+Add_User_Status AS (
+SELECT Grouped_event_names.*, converted_subscribed, converted_paid, user_persona, utm_source, utm_medium,
+       COUNT(*) over (partition by user_registrations.user_id, record_date) AS row_count_user_time
+FROM Grouped_event_names
+LEFT JOIN reporting.user_registrations ON reporting.user_registrations.user_id = Grouped_event_names.user_id
+LEFT JOIN top_users ON top_users.user_id = Grouped_event_names.user_id),
+
+/* filter out page views - which has another exact time as another event
+   also remove uneccssary page views */
+
+Filter_Page_Views AS (
+SELECT *
+FROM Add_User_Status
+WHERE (row_count_user_time = 1 or (row_count_user_time > 1 and event_name <> 'page view'))
+AND event_name <> 'close book' and event_name <> 'book closing'
+AND Stripped_URL NOT IN ('welcome', 'confirmation', 'registration', 'not-found', 'welcome#')),
+
+/* mark personalise question as onboarding question - mark page view home as Hompepage view */
+
+Change_URLs_Stats AS (
+SELECT user_id, stripped_url, event_name, record_date, user_event_number, user_persona, converted_subscribed,
+       converted_paid, utm_source, utm_medium,
+       CASE WHEN stripped_url LIKE 'personalise?question%' or Stripped_URL LIKE 'confirmation?question%' THEN 'Onboarding Question'
+            WHEN stripped_url = 'home' and event_name = 'page view' THEN 'HomePage'
+            WHEN Stripped_URL = 'settings' and event_name = 'page view' THEN 'Account Info'
+            WHEN Stripped_URL = 'search' and event_name = 'page view' THEN 'Search'
+            WHEN Stripped_URL LIKE 'book%' and event_name = 'page view' THEN 'book cover click'
+            WHEN Stripped_URL LIKE 'search?query%' and event_name = 'page view' THEN 'Search'
+            WHEN Stripped_URL = 'cancellation' and event_name = 'page view' THEN 'Subscription Cancel'
+            WHEN event_name IN ('copy', 'highlights tab opening') THEN 'Reading'
+            WHEN Stripped_URL LIKE '%ereader%' and event_name = 'page view' THEN 'Reading'
+            WHEN Stripped_URL = 'reading' and event_name = 'page view' THEN 'Reading'
+            WHEN Stripped_URL LIKE 'workspace%' and event_name = 'page view' THEN 'Workspace'
+            WHEN Stripped_URL = 'want-to-read' and event_name = 'page view' THEN 'Book Status / Library'
+            WHEN (Stripped_URL LIKE 'browse%' or Stripped_URL = 'Discover' or Stripped_URL = 'discover') and event_name = 'page view' THEN 'Browse / Discover'
+            ELSE grouped_event_name END AS grouped_event_name
+FROM Filter_Page_Views),
+
+/* filter out subscription creation & onaboarding process to reduce errors -where the tracking db has missed records
+assumed all users go through onboarding process in some form - B2C*/
+
+Filtered_out_events AS (
+SELECT *, row_number() over (partition by user_id order by record_date) AS Filtered_Row_Event_Number
+FROM Change_URLs_Stats
+WHERE grouped_event_name NOT IN ('subscription creation', 'Onboarding Question')
+ORDER BY user_id, record_date
+),
+
+     /* Mark when a new event block starts for each user - remove the duplicate records   */
+New_Event_Block AS (
+SELECT user_id, stripped_url, event_name, record_date, user_event_number, utm_source, utm_medium,
+       grouped_event_name, user_persona, converted_paid, converted_subscribed,
+       CASE WHEN LAG(Grouped_Event_Name, 1) OVER (PARTITION BY user_id order by record_date) <> Grouped_Event_Name OR (
+           Filtered_Row_Event_Number = 1) THEN grouped_event_name ELSE NULL END AS Start_Group_Event_Block,
+
+CASE WHEN LAG(Grouped_Event_Name, 1) OVER (PARTITION BY user_id order by record_date) <> Grouped_Event_Name OR (
+           Filtered_Row_Event_Number = 1) THEN record_date ELSE NULL END AS Start_Group_date
+
+FROM Filtered_out_events
+ORDER BY user_id, User_Event_Number, record_date),
+
+/* average rfi score for users  */
+
+User_Engagement_Score AS (
+SELECT user_id, avg(1.0*combined_score) AS avg_user_score
+FROM reporting_layer.user_rfi_history_subscriber_monthly
+WHERE user_id IN (SELECT user_id FROM New_Event_Block)
+GROUP BY user_id)
+
+/* Output main data  */
+SELECT New_Event_Block.*, avg_user_score,
+       row_number() over (partition by New_Event_Block.user_id order by User_Event_Number) AS Grouped_Row_User_Number
+FROM New_Event_Block
+LEFT JOIN User_Engagement_Score ON User_Engagement_Score.user_id = New_Event_Block.user_id
+WHERE Start_Group_Event_Block IS NOT NULL
+ORDER BY user_id, User_Event_Number, record_date
+
