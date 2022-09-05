@@ -1,0 +1,548 @@
+setwd("/Users/hughwaters/Documents/Ad Hoc Data/Book Title Value Project/Perlego_SEO_Relationship")
+
+library(dplyr)
+library(ggplot2)
+library(zoo)
+library(car)
+
+# Read in SEO data 
+
+SEO_Data <- read.csv('Keyword_URL_Grouped_Summary_Perlego_Included.csv')
+
+# filter to Perlego Metadata 
+
+Perlego_Meta <- filter(SEO_Data, Meta_Source == 'Perlego')
+
+# Refere books 
+
+Internal_Perlego <- read.csv('All_referrer_books_b2c.csv')
+
+# Book subject / topic & DLP
+
+Perlego_Book_Info <- read.csv('book_dlp_subject.csv')
+
+# usa only test 
+
+USA_Results <- read.csv('usa_results_only.csv')
+
+# subject data 
+
+subject_type <- read.csv('subject_discipline.csv')
+
+# join subject type to perlego book info 
+
+Perlego_Book_Info <- merge.data.frame(Perlego_Book_Info, subject_type, by.x = 'subject_name', by.y = 'subject_name', all.x = T)
+
+# Group by book id --------------------------------------------------------
+
+Internal_Perlego_Book_Only <- group_by(Internal_Perlego, referrer_book) %>%
+                              summarise(Create_Account = sum(users_created_accounts),
+                                        Trialists = sum(users_started_trial),
+                                        Subscribers = sum(users_became_subscriber))
+
+USA_Internal_Perlego_Book_Only <- group_by(USA_Results, referrer_book) %>%
+                            summarise(Create_Account = sum(users_created_accounts),
+                                      Trialists = sum(users_started_trial),
+                                      Subscribers = sum(users_became_subscriber))
+
+
+# Combine the data sources & Mark fields ------------------------------------------------
+# Join perlego meta data to referer perlego books 
+
+Combined_Data <- merge.data.frame(Perlego_Meta, Internal_Perlego_Book_Only, by.x = 'Perlego_Book_Id', by.y = 'referrer_book', all.x = T)
+
+Combined_Data <- merge.data.frame(Combined_Data, Perlego_Book_Info, by.x = 'Perlego_Book_Id', by.y = 'book_id', all.x = T)
+
+Combined_Data_USA <- merge.data.frame(Perlego_Meta, USA_Internal_Perlego_Book_Only, by.x = 'Perlego_Book_Id', by.y = 'referrer_book', all.x = T)
+
+Combined_Data_USA <- merge.data.frame(Combined_Data_USA, Perlego_Book_Info, by.x = 'Perlego_Book_Id', by.y = 'book_id', all.x = T)
+
+# remove old data 
+
+rm(Internal_Perlego, Internal_Perlego_Book_Only, SEO_Data, Perlego_Meta, Perlego_Book_Info)
+
+# Mark subject type name 
+
+# Fill NA with 0
+
+Combined_Data$Create_Account <- na.fill(Combined_Data$Create_Account, 0) 
+Combined_Data$Trialists <- na.fill(Combined_Data$Trialists, 0) 
+Combined_Data$Subscribers <- na.fill(Combined_Data$Subscribers, 0) 
+
+
+# Relationship Between Variables -------------------------------------------
+
+# Summary 
+
+summary(Combined_Data$Create_Account)
+summary(Combined_Data$Trialists)
+summary(Combined_Data$Subscribers)
+
+# distribution - account creation 
+
+filter(Combined_Data, Create_Account <= 21) %>%
+ggplot(., aes(Create_Account))+geom_histogram()
+
+account_IQR = quantile(Combined_Data$Create_Account, c(0.75)) - quantile(Combined_Data$Create_Account, c(0.25))
+
+upper_outlier_account <- quantile(Combined_Data$Create_Account, c(0.75)) + 1.5*(account_IQR)
+
+# brief test - range 
+
+basic_linear <- filter(Combined_Data, Create_Account <= 21)
+basic_linear <- mutate(basic_linear, KW_Search_Volume_100 = KW_Search_Volume / 100)
+
+summary(lm(Create_Account ~ Publisher_URL_Traffic, data = basic_linear))
+
+
+basic_linear <- filter(Combined_Data, Create_Account <= 21)
+basic_linear <- mutate(basic_linear, KW_Search_Volume_100 = KW_Search_Volume / 100)
+
+summary(lm(Create_Account ~ Publisher_URL_Traffic + KW_Search_Volume, data = Combined_Data))
+
+# kw search volume & conversions 
+
+kw_outlier <- quantile(Combined_Data$KW_Search_Volume, c(0.75)) + 1.5*(quantile(Combined_Data$KW_Search_Volume, c(0.75)) - quantile(Combined_Data$KW_Search_Volume, c(0.25)))
+publisher_url_putlier <- quantile(Combined_Data$Publisher_URL_Traffic, c(0.75)) + 1.5*(quantile(Combined_Data$Publisher_URL_Traffic, c(0.75)) - quantile(Combined_Data$Publisher_URL_Traffic, c(0.25)))
+
+Combined_Data <- mutate(Combined_Data, kw_under_q3_outlier = ifelse(KW_Search_Volume <= 255, KW_Search_Volume, NA))
+Combined_Data <- mutate(Combined_Data, url_under_q3_outlier = ifelse(Publisher_URL_Traffic <= 16, Publisher_URL_Traffic, NA))
+
+
+summary(lm(Create_Account ~ kw_under_q3_outlier + url_under_q3_outlier, data = Combined_Data))
+
+# cooks distance 
+
+mod <- lm(Create_Account ~ Publisher_URL_Traffic + KW_Search_Volume, data=Combined_Data)
+cooksd <- cooks.distance(mod)
+influential <- as.numeric(names(cooksd)[(cooksd > 4*mean(cooksd, na.rm=T))])
+influential_dataframe <- data.frame(row_number = influential)
+influential_dataframe <- mutate(influential_dataframe, Cook_Influence = 'Yes')
+
+Combined_Data <- mutate(Combined_Data, ID =  row_number())
+
+Combined_Data <- merge.data.frame(Combined_Data, influential_dataframe, all.x = T, by.x = 'ID', by.y = 'row_number')
+
+Combined_Data <- mutate(Combined_Data, KW_cook_remove = ifelse(is.na(Cook_Influence) == T, KW_Search_Volume, NA),
+                        Publisher_traffic_remove = ifelse(is.na(Cook_Influence) == T, Publisher_URL_Traffic, NA))
+  
+summary(lm(Create_Account ~ Publisher_traffic_remove + KW_cook_remove, data=Combined_Data))
+
+# USA Test  ---------------------------------------------------------------
+
+
+Combined_Data_USA$Create_Account <- na.fill(Combined_Data_USA$Create_Account, 0) 
+Combined_Data_USA$Trialists <- na.fill(Combined_Data_USA$Trialists, 0) 
+Combined_Data_USA$Subscribers <- na.fill(Combined_Data_USA$Subscribers, 0) 
+
+Combined_Data_USA <- mutate(Combined_Data_USA, kw_under_q3_outlier = ifelse(KW_Search_Volume <= 255, KW_Search_Volume, NA))
+Combined_Data_USA <- mutate(Combined_Data_USA, url_under_q3_outlier = ifelse(Publisher_URL_Traffic <= 16, Publisher_URL_Traffic, NA))
+
+summary(lm(Create_Account ~ kw_under_q3_outlier + url_under_q3_outlier, data = Combined_Data_USA))
+
+##
+mod <- lm(Create_Account ~ Publisher_URL_Traffic + KW_Search_Volume, data=Combined_Data_USA)
+cooksd <- cooks.distance(mod)
+influential <- as.numeric(names(cooksd)[(cooksd > 4*mean(cooksd, na.rm=T))])
+influential_dataframe <- data.frame(row_number = influential)
+influential_dataframe <- mutate(influential_dataframe, Cook_Influence = 'Yes')
+
+Combined_Data_USA <- mutate(Combined_Data_USA, ID =  row_number())
+
+Combined_Data_USA <- merge.data.frame(Combined_Data_USA, influential_dataframe, all.x = T, by.x = 'ID', by.y = 'row_number')
+
+Combined_Data_USA <- mutate(Combined_Data_USA, KW_cook_remove = ifelse(is.na(Cook_Influence) == T, KW_Search_Volume, NA),
+                        Publisher_traffic_remove = ifelse(is.na(Cook_Influence) == T, Publisher_URL_Traffic, NA))
+
+summary(lm(Create_Account ~ Publisher_traffic_remove + KW_cook_remove, data=Combined_Data_USA))
+
+
+
+
+
+
+# Subject Test relationship  -----------------------------------------------------
+
+# mark NA with unknown 
+
+Combined_Data$academic_discipline <- na.fill(Combined_Data$academic_discipline, 'Unknown')
+
+Combined_Data$academic_discipline <- factor(Combined_Data$academic_discipline, levels = c('Unknown', 'Social Sciences', 'STEM', 'Humanities'))
+
+# LM test 
+b <- filter(Combined_Data, academic_discipline == 'STEM') %>%
+lm(Create_Account ~ Publisher_traffic_remove + KW_cook_remove, data = .)
+
+b <- filter(Combined_Data, academic_discipline == 'Humanities') %>%
+  lm(Create_Account ~ Publisher_traffic_remove + KW_cook_remove, data = .)
+
+b <- filter(Combined_Data, academic_discipline == 'Social Sciences') %>%
+  lm(Create_Account ~ Publisher_traffic_remove + KW_cook_remove, data = .)
+
+b <- filter(Combined_Data, academic_discipline == 'Unknown') %>%
+  lm(Create_Account ~ Publisher_traffic_remove + KW_cook_remove, data = .)
+
+
+summary(lm(Create_Account ~ Publisher_traffic_remove + KW_cook_remove + academic_discipline, data = Combined_Data))
+
+
+# Price  ------------------------------------------------------------------
+
+# mark outliers as median values - see if signifcantly different per discipline 
+
+summary(aov(dlp ~ academic_discipline, data = Combined_Data))
+
+# replace extreme values with median price per academic discipline 
+
+Combined_Data <- group_by(Combined_Data, academic_discipline) %>%
+  mutate(IQR = quantile(dlp, na.rm = T, c(0.75)) - quantile(dlp, na.rm = T, c(0.25)),
+         q3 = quantile(dlp, na.rm = T, c(0.75)),
+         median_dlp = median(dlp, na.rm = T)) %>%
+  ungroup %>%
+  mutate(dlp_filtered = ifelse(dlp <= (q3 + 1.5*IQR), dlp, median_dlp))
+
+# log transform 
+
+Combined_Data <- mutate(Combined_Data, log_publisher = log(Publisher_URL_Traffic),
+                        log_kw_vol = log(KW_Search_Volume),
+                        log_publisher = ifelse(is.infinite(log_publisher) == T, NA, log_publisher),
+                        log_kw_vol = ifelse(is.infinite(log_kw_vol) == T, NA, log_kw_vol))
+
+
+
+
+b<- lm(Create_Account ~ log_publisher + log_kw_vol + academic_discipline + dlp_filtered, data = Combined_Data)
+
+Combined_Data <- mutate(Combined_Data, Humanities_binary = ifelse(academic_discipline == 'Humanities', 1, 0),
+                        Social_sciences_binary= ifelse(academic_discipline == 'Social Sciences', 1, 0))
+
+b<- lm(Create_Account ~ log_publisher + log_kw_vol + Humanities_binary + Social_sciences_binary + dlp_filtered + I(dlp_filtered^2), data = Combined_Data)
+
+# residuals 
+library(devtools)
+install_github("ProcessMiner/nlcor")
+library(nlcor)
+no_null <- filter(Combined_Data, is.na(log_kw_vol) == F)
+nlcor(no_null$Create_Account,no_null$log_kw_vol, plt = T)
+
+
+# Prediction test  --------------------------------------------------------
+
+
+set.seed(435)
+
+row_number <- sample(1:nrow(Combined_Data), 0.8*nrow(Combined_Data))
+
+train = Combined_Data[row_number,]
+test = Combined_Data[-row_number,]
+
+mod <- lm(Create_Account ~ log_publisher + log_kw_vol + Humanities_binary + Social_sciences_binary + dlp_filtered + I(Social_sciences_binary * dlp_filtered), data = train)
+
+pred1 <- predict(mod, newdata = test)
+rmse <- sqrt(sum((exp(pred1) - test$Create_Account)^2)/length(test$Create_Account))
+
+c(RMSE = rmse, R2=summary(mod)$r.squared)
+
+
+# Final -------------------------------------------------------------------
+
+mod <- lm(Create_Account ~ log_publisher + log_kw_vol + Humanities_binary + Social_sciences_binary + dlp_filtered + I(dlp_filtered ^ 2) + I(Social_sciences_binary * dlp_filtered) + I(Social_sciences_binary * dlp_filtered) + I(Humanities_binary * dlp_filtered), data = Combined_Data)
+summary(mod)
+
+
+ggplot(Combined_Data_test, aes(Create_Account, dlp_filtered))+geom_point()+geom_smooth()+facet_wrap(~academic_discipline)
+
+Combined_Data_test <- filter(Combined_Data, Create_Account < 100)
+
+mod <- lm(Create_Account ~ log_publisher + log_kw_vol + Humanities_binary + Social_sciences_binary + dlp_filtered + I(dlp_filtered ^ 2) + I(Social_sciences_binary * dlp_filtered) + I(Social_sciences_binary * dlp_filtered) + I(Humanities_binary * dlp_filtered), data = Combined_Data)
+summary(mod)
+
+
+filter(Combined_Data_test, academic_discipline == 'Social Sciences') %>%
+ggplot(., aes(Create_Account, dlp_filtered))+geom_point()+geom_smooth()+facet_wrap(~subject_name)
+
+
+# Top rank ----------------------------------------------------------------
+
+mod <- lm(Create_Account ~ log_publisher + log_kw_vol + Humanities_binary + Social_sciences_binary + dlp_filtered + I(dlp_filtered ^ 2) + I(Social_sciences_binary * dlp_filtered) + I(Social_sciences_binary * dlp_filtered) + I(Humanities_binary * dlp_filtered) + KW_Traffic_Rank + Publisher_URL_Traffic_Rank, data = Combined_Data_test)
+summary(mod)
+
+
+cor.test(Combined_Data$KW_Traffic_Rank, Combined_Data$Create_Account)
+cor.test(Combined_Data$Publisher_URL_Traffic_Rank, Combined_Data$Create_Account)
+
+# 100 breakdown 
+
+Combined_Data <- mutate(Combined_Data, KW_Rank_Group_20 = ntile(KW_Search_Volume, 20),
+                        publisher_site_20 = ntile(Publisher_URL_Traffic, 20),
+                        KW_Rank_Group_4 = ntile(KW_Search_Volume, 4))
+
+
+accounts_kw_group <- group_by(Combined_Data, KW_Rank_Group_20) %>% 
+                     summarise(Total = n(), accounts = sum(Create_Account)) %>%
+                     ungroup() %>%
+                     mutate(average_test = accounts / Total)
+
+accounts_url_group <- group_by(Combined_Data, publisher_site_20) %>% 
+  summarise(Total = n(), accounts = sum(Create_Account)) %>%
+  ungroup() %>%
+  mutate(average_test = accounts / Total)
+
+# filter - top 25% - no convesion 
+
+Combined_Data_test <- filter(Combined_Data, KW_Rank_Group_20 >= 16 & publisher_site_20 >= 16)
+
+group_by(Combined_Data_test, academic_discipline) %>%
+  summarise(total = n(), accounts = sum(Create_Account)) %>%
+  mutate(accounts / total)
+
+mod <- lm(Create_Account ~ academic_discipline + dlp_filtered, data = Combined_Data_test)
+summary(mod)
+
+
+# Write Up Results --------------------------------------------------------
+
+# slide 1 - average account creation per rank - Ahref data 
+
+cor.test(Combined_Data$Trialists, Combined_Data$Publisher_URL_Traffic)
+cor.test(Combined_Data$Trialists, Combined_Data$KW_Search_Volume)
+
+Combined_Data$KW_Rank_Group_20_per <- Combined_Data$KW_Rank_Group_20*5
+Combined_Data$publisher_site_20_per <- Combined_Data$publisher_site_20*5
+
+
+summary(lm(Trialists ~ log_publisher + log_kw_vol, data = Combined_Data))
+
+
+# graphs 
+
+kw_group_graph <- group_by(Combined_Data, KW_Rank_Group_20_per) %>%
+  summarise(URL_s = n(), Trials = sum(Trialists))%>%
+  ungroup %>%
+  mutate(Average_Per_URL = Trials / URL_s) %>%
+  ggplot(., aes(factor(KW_Rank_Group_20_per), Average_Per_URL, fill = I('#3327EC')))+geom_col()+theme_bw()+scale_y_continuous(expand = c(0,0.1), breaks = seq(0, 20, 2))+xlab('Key Word Volume Percentile Group')+ylab('Average Trials Per URL')+theme(panel.background = element_rect(fill = '#ffffff'))
+
+kw_group_graph+theme(axis.title.x = element_text(color='black'))+ggtitle('Trials By Keyword Volume Percentile')
+
+publisher_group_graph <- group_by(Combined_Data, publisher_site_20_per) %>%
+  summarise(URL_s = n(), Trials = sum(Trialists))%>%
+  ungroup %>%
+  mutate(Average_Per_URL = Trials / URL_s) %>%
+  ggplot(., aes(factor(publisher_site_20_per), Average_Per_URL, fill = I('#3327EC')))+geom_col()+theme_bw()+scale_y_continuous(expand = c(0,0.1), breaks = seq(0, 40, 2))+xlab('Key Word Volume Percentile Group')+ylab('Average Trials Per URL')+theme(panel.background = element_rect(fill = '#ffffff'))
+
+publisher_group_graph+theme(axis.title.x = element_text(color='black'))+ggtitle('Trials By URL Traffic Volume Percentile')
+
+# top 10% 
+
+Top_10_Percent_data <- filter(Combined_Data, publisher_site_20_per >= 95)
+
+top_10_percent_academic_discipline <- group_by(Top_10_Percent_data, academic_discipline) %>%
+                                      summarise(URLs = n(), Trials = sum(Trialists)) %>%
+                                      mutate(Average_per_url = Trials / URLs)
+
+filter(top_10_percent_academic_discipline, academic_discipline != 'Unknown') %>%
+ggplot(., aes(academic_discipline, Average_per_url, fill = I('#3327EC')))+geom_col()+theme_bw()+scale_y_continuous(expand = c(0,0.1), breaks = seq(0, 30, 2))+xlab('Academic Discipline Of Book')+ylab('Average Trials Per URL')+ggtitle('Top 10% Traffic By Academic Discipline')
+
+
+overall_percent_academic_discipline <- group_by(Combined_Data, academic_discipline) %>%
+  summarise(URLs = n(), Trials = sum(Trialists)) %>%
+  mutate(Average_per_url = Trials / URLs)
+
+
+filter(overall_percent_academic_discipline, academic_discipline != 'Unknown') %>%
+  ggplot(., aes(academic_discipline, Average_per_url, fill = I('#3327EC')))+geom_col()+theme_bw()+scale_y_continuous(expand = c(0,0.1), breaks = seq(0, 30, 2))+xlab('Academic Discipline Of Book')+ylab('Average Trials Per URL')+ggtitle('Overall Traffic By Academic Discipline')
+
+
+# top 10% price 
+
+filter(Top_10_Percent_data, Trialists < 100 & academic_discipline != 'Unknown') %>%
+ggplot(., aes(dlp_filtered, Trialists))+geom_point()+geom_smooth(se = F, color = 'red')+facet_wrap(~academic_discipline, ncol = 3)+theme_bw()+ylab('Created Accounts') +xlab('DLP')+scale_x_continuous(breaks = seq(0, 100, 10))+ggtitle('Top 10% Traffic - Book Price')
+
+b<- filter(Top_10_Percent_data, (academic_discipline == 'Social Sciences' | academic_discipline == 'Humanities' | academic_discipline == 'STEM')) %>%
+group_by(subject_name) %>%
+  summarise(URLs = n(), trials = sum(Trialists)) %>%
+  mutate(average = trials / URLs)
+
+# all subjects 
+
+all_subjects<- filter(Combined_Data, (academic_discipline == 'Social Sciences' | academic_discipline == 'Humanities' | academic_discipline == 'STEM')) %>%
+  group_by(subject_name) %>%
+  summarise(URLs = n(), trials = sum(Trialists)) %>%
+  mutate(average = trials / URLs)
+
+
+# price vs trials overall 
+
+filter(Combined_Data, Trialists <= 100) %>%
+ggplot(., aes(dlp_filtered, Trialists))+geom_point()+geom_smooth(se = F, color = 'red')+theme_bw()+xlab('DLP')+scale_x_continuous(breaks = seq(0, 100, 10))
+
+
+filter(Combined_Data, Trialists <= 50) %>%
+  ggplot(., aes(dlp_filtered, Trialists))+geom_point()+geom_smooth(se = F, color = 'red')+theme_bw()+xlab('DLP')+scale_x_continuous(breaks = seq(0, 100, 10))
+
+# model overall 
+
+train <- mutate(train, STEM_Binary = ifelse(academic_discipline == 'STEM', 1, 0))
+
+mod <- lm(Trialists ~ Publisher_traffic_remove + log(KW_cook_remove) + Humanities_binary + Social_sciences_binary + dlp_filtered + I(Social_sciences_binary * dlp_filtered) + I(dlp_filtered^2) + STEM_Binary, data = train)
+summary(mod)
+
+# export price to add to main Perlego sheet 
+
+Perlego_Price <- select(Combined_Data, Perlego_Book_Id, dlp_filtered, academic_discipline, Trialists)
+write.csv(Perlego_Price, 'Perlego_Price.csv')
+
+
+# Conversion rate  --------------------------------------------------------
+
+Combined_Data <- mutate(Combined_Data, Conversion_Rate_Month = 100*((Trialists / 12) / (Publisher_URL_Traffic + log(KW_Search_Volume))))
+
+# average per subject 
+
+group_by(Combined_Data, academic_discipline) %>% 
+  summarise(Average_Conversion = mean(Conversion_Rate_Month))
+
+Combined_Data <- mutate(Combined_Data, Price_Group = ifelse(dlp_filtered < 20, '< 20', NA),
+                        Price_Group = ifelse(dlp_filtered >= 20 & dlp_filtered < 40, '20 - 40', Price_Group),
+                        Price_Group = ifelse(dlp_filtered >= 40 & dlp_filtered < 60, '40 - 60', Price_Group),
+                        Price_Group = ifelse(dlp_filtered > 60, '60+', Price_Group))
+
+
+base_averages <- group_by(Combined_Data, academic_discipline, Price_Group) %>% 
+  summarise(Average_Conversion = round(mean(Conversion_Rate_Month), 1))
+
+write.csv(base_averages, 'base_averages.csv')
+
+base_averages_no_stem <- 
+  filter(Combined_Data, academic_discipline != 'STEM') %>%
+    group_by(Price_Group) %>% 
+  summarise(Average_Conversion = round(mean(Conversion_Rate_Month), 1))
+
+base_averages_stem_only <- 
+  filter(Combined_Data, academic_discipline == 'STEM') %>%
+  group_by(Price_Group) %>% 
+  summarise(Average_Conversion = round(mean(Conversion_Rate_Month), 1))
+
+
+write.csv(base_averages, 'base_averages.csv')
+
+write.csv(base_averages_no_stem, 'base_averages_no_stem.csv')
+write.csv(base_averages_stem_only, 'base_averages_stem_only.csv')
+
+
+
+Combined_Data <- mutate(Combined_Data, Conversion_Rate_Month = ifelse(Conversion_Rate_Month > 100, 100, Conversion_Rate_Month))
+
+
+
+# price only 
+
+Combined_Data <- mutate(Combined_Data, Price_Group_2 = ifelse(dlp_filtered < 20, '< 20', NA),
+                        Price_Group_2 = ifelse(dlp_filtered >= 20 & dlp_filtered < 30, '20 - 30', Price_Group_2),
+                        Price_Group_2 = ifelse(dlp_filtered >= 30 & dlp_filtered < 40, '30 - 40', Price_Group_2),
+                        Price_Group_2 = ifelse(dlp_filtered >= 40 & dlp_filtered < 50, '40 - 50', Price_Group_2),
+                        Price_Group_2 = ifelse(dlp_filtered >= 50 & dlp_filtered < 60, '50 - 60', Price_Group_2),
+                        Price_Group_2 = ifelse(dlp_filtered > 60, '60+', Price_Group_2))
+
+price_averages_only <- group_by(Combined_Data, Price_Group) %>% 
+  summarise(Average_Conversion = round(mean(Conversion_Rate_Month), 1))
+
+price_averages_only_2 <- group_by(Combined_Data, Price_Group_2) %>% 
+  summarise(Average_Conversion = round(mean(Conversion_Rate_Month), 1))
+
+
+# conversion rate by price 
+
+overall_convert<-filter(Combined_Data, Conversion_Rate_Month < 20) %>%
+  mutate(dlp_filtered_round = round(dlp_filtered)) %>%
+group_by(dlp_filtered_round) %>%
+  summarise(average_conversion = mean(Conversion_Rate_Month))
+
+
+
+overall_convert_dis<-filter(Combined_Data, Conversion_Rate_Month < 20 & academic_discipline != 'Unknown') %>%
+  mutate(dlp_filtered_round = round(dlp_filtered)) %>%
+  group_by(dlp_filtered_round, academic_discipline) %>%
+  summarise(average_conversion = mean(Conversion_Rate_Month))
+
+ggplot(overall_convert_dis, aes(dlp_filtered_round, average_conversion, color = academic_discipline))+geom_point()+geom_smooth(se = F)+facet_wrap(~academic_discipline)
+
+
+
+ggplot(overall_convert, aes(dlp_filtered_round, average_conversion))+geom_point()+geom_smooth(se = F)+theme_bw()+xlab('DLP') + ylab('Average Trial Conversion % Per Month')+ggtitle('Trial Conversion Vs DLP')+scale_x_continuous(breaks = seq(0, 100, 5))+scale_y_continuous(breaks = seq(0, 10, 1))
+
+ggplot(overall_convert_dis, aes(dlp_filtered_round, average_conversion, color = academic_discipline))+geom_point()+theme_bw()+xlab('DLP') + ylab('Average Trial Conversion % Per Month')+ggtitle('Trial Conversion Vs DLP')+scale_color_discrete(name = 'Academic Discipline')+scale_x_continuous(breaks = seq(0, 100, 5))+scale_y_continuous(breaks = seq(0, 10, 1))
+
+
+
+
+
+overall_convert_dis<-filter(Combined_Data, Conversion_Rate_Month < 20 & subject_name != 'Unknown') %>%
+  mutate(dlp_filtered_round = round(dlp_filtered)) %>%
+  group_by(dlp_filtered_round, academic_discipline, subject_name) %>%
+  summarise(average_conversion = mean(Conversion_Rate_Month))
+
+ggplot(overall_convert_dis, aes(dlp_filtered_round, average_conversion, color = academic_discipline))+geom_point()+geom_smooth(se = F)+facet_wrap(~subject_name)
+
+
+
+# Stem --------------------------------------------------------------------
+
+
+# STEM titles 
+
+STEM_Books <- filter(Combined_Data, academic_discipline == 'STEM')
+
+Stem_book_titles <- c(STEM_Books$Book_Title)
+
+Stem_book_titles <- strsplit(Stem_book_titles, split = ' ')
+
+newVec <- unlist(sapply(Stem_book_titles, strsplit, "\\s+", USE.NAMES = FALSE))
+
+stem_title_dataframe <- data.frame(Stem_words = newVec)
+
+
+library(tm)
+
+docs <- Corpus(VectorSource(stem_title_dataframe))
+docs <- tm_map(docs, content_transformer(tolower))
+
+docs <- tm_map(docs, removeWords, stopwords("english"))
+docs <- tm_map(docs, removeWords, stopwords("spanish"))
+docs <- tm_map(docs, removeWords, stopwords("french"))
+
+dtm <- TermDocumentMatrix(docs) 
+matrix <- as.matrix(dtm) 
+words <- sort(rowSums(matrix),decreasing=TRUE) 
+df <- data.frame(word = names(words),freq=words)
+
+
+# Main Results ------------------------------------------------------------
+
+
+ggplot(overall_convert, aes(dlp_filtered_round, average_conversion))+geom_point()+geom_smooth(se = F)+theme_bw()+xlab('DLP') + ylab('Average Page Visit To Subscription Created % Per Month')+ggtitle('Page Visit To Subscription Created Vs DLP')+scale_x_continuous(breaks = seq(0, 100, 5))+scale_y_continuous(breaks = seq(0, 10, 1))
+
+ggplot(overall_convert_dis, aes(dlp_filtered_round, average_conversion, color = academic_discipline))+geom_point()+theme_bw()+xlab('DLP') + ylab('Average Page Visit To Subscription Created % Per Month')+ggtitle('Page Visit To Subscription Created Vs DLP, by Discipline')+scale_color_discrete(name = 'Academic Discipline')+scale_x_continuous(breaks = seq(0, 100, 5))+scale_y_continuous(breaks = seq(0, 10, 1))
+
+# Split Price Bandings by £5 
+
+Combined_Data <- mutate(Combined_Data, Price_Group_3 = ifelse(dlp_filtered < 5, '< 5', NA),
+                        Price_Group_3 = ifelse(dlp_filtered >= 5 & dlp_filtered < 10, '5 - 10', Price_Group_3),
+                        Price_Group_3 = ifelse(dlp_filtered >= 10 & dlp_filtered < 15, '10 - 15', Price_Group_3),
+                        Price_Group_3 = ifelse(dlp_filtered >= 15 & dlp_filtered < 20, '15 - 20', Price_Group_3),
+                        Price_Group_3 = ifelse(dlp_filtered >= 20 & dlp_filtered < 25, '20 - 25', Price_Group_3),
+                        Price_Group_3 = ifelse(dlp_filtered >= 25 & dlp_filtered < 30, '25 - 30', Price_Group_3),
+                        Price_Group_3 = ifelse(dlp_filtered >= 30 & dlp_filtered < 40, '30 - 40', Price_Group_3),
+                        Price_Group_3 = ifelse(dlp_filtered >= 40 & dlp_filtered < 50, '40 - 50', Price_Group_3),
+                        Price_Group_3 = ifelse(dlp_filtered >= 50 & dlp_filtered < 60, '50 - 60', Price_Group_3),
+                        Price_Group_3 = ifelse(dlp_filtered > 60, '60+', Price_Group_3))
+
+
+Final_Price_Splits <- group_by(Combined_Data, Price_Group_3, academic_discipline) %>% 
+  summarise(count = n(), Average_Conversion = round(mean(Conversion_Rate_Month), 1))
+
+write.csv(Final_Price_Splits, "Final_Price_Splits_test.csv")
+
+ggplot(Final_Price_Splits, aes(Price_Group_3, Average_Conversion))+geom_col()+facet_wrap(~academic_discipline)
+
+
