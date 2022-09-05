@@ -1,0 +1,27 @@
+/* ltv per country - 2022 
+
+
+SELECT analytics_reporting.user_registrations.user_id, user_region, analytics_reporting.user_registrations.country, paid_amount_gbp, period_start, 
+analytics_reporting.user_registrations.year_of_graduation 
+FROM analytics_reporting.user_registrations
+INNER JOIN analytics_reporting.direct_user_payments ON analytics_reporting.direct_user_payments.user_id = analytics_reporting.user_registrations.user_id
+WHERE payment_channel_crude = 'direct' 
+AND period_start >= CAST('2022-01-01' as date)
+ORDER BY analytics_reporting.user_registrations.user_id, period_start*/
+
+
+SELECT analytics_reporting.user_registrations.year_of_graduation, user_persona, count(*) as d2c_payments, count(distinct(analytics_reporting.user_registrations.user_id)) as unique_users, 
+sum(paid_amount_gbp) as ltv 
+FROM analytics_reporting.user_registrations
+INNER JOIN analytics_reporting.direct_user_payments ON analytics_reporting.direct_user_payments.user_id = analytics_reporting.user_registrations.user_id
+WHERE payment_channel_crude = 'direct' 
+AND period_start >= CAST('2022-01-01' as date)
+group by analytics_reporting.user_registrations.year_of_graduation, user_persona
+
+
+SELECT country, count(distinct(analytics_reporting.user_registrations.user_id)) as unique_users 
+FROM analytics_reporting.user_registrations
+INNER JOIN analytics_reporting.direct_user_payments ON analytics_reporting.direct_user_payments.user_id = analytics_reporting.user_registrations.user_id
+WHERE payment_channel_crude = 'direct' 
+AND period_start >= CAST('2022-01-01' as date)
+group by country
