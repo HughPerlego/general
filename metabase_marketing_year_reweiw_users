@@ -1,0 +1,38 @@
+/* Create Week Calendar Table - Filter to start 2020 and current date */
+WITH WeekTable AS
+    (SELECT DATEDIFF(week, '2020-01-01', calendar_date) AS WeekNumber,
+       MIN(calendar_date) AS WeekStartDate,
+       MAX(calendar_date) AS WeekEndDate
+FROM reporting_layer.ref_calendar_day
+WHERE calendar_date >= '2020-01-01' and calendar_date <= getdate()
+GROUP BY DATEDIFF(WEEK, '2020-01-01', calendar_date)),
+
+     /* Paid Subscribers -or Active B2B subscribers */
+SubscriberCount AS (
+SELECT WeekTable.*, s.user_id, s.payment_channel, s.start_timestamp, end_timestamp
+from reporting.subscriptions s
+join WeekTable on
+    (s.start_timestamp between WeekTable.WeekStartDate and WeekTable.WeekEndDate)
+or (s.start_timestamp < WeekTable.WeekStartDate and s.end_timestamp > WeekStartDate)
+WHERE subscription_type = 'subscribed'
+AND (s.payment_channel = 'indirect' or s.paid_months > 0)),
+
+/* Show count by week */
+Count_By_Week AS (
+SELECT WeekNumber, WeekStartDate, WeekEndDate,
+       SUM(CASE WHEN payment_channel = 'direct' THEN 1 ELSE 0 END) AS B2C_Subscribers,
+       SUM(CASE WHEN payment_channel = 'indirect' THEN 1 ELSE 0 END) AS B2B_Subscribers,
+       COUNT(payment_channel) AS Total_Subscribers,
+       datediff(day, WeekStartDate, WeekEndDate) AS DaysInWeek
+FROM SubscriberCount
+GROUP BY WeekNumber, WeekStartDate, WeekEndDate
+ORDER BY WeekNumber),
+
+result as (
+SELECT WeekStartDate, B2C_Subscribers, B2B_Subscribers, case when WeekStartDate = '2021-11-28' then '2021' else '2020' end as Year
+FROM Count_By_Week
+WHERE WeekStartDate = '2020-11-29' or WeekStartDate = '2021-11-28'
+order by Year)
+
+select *
+from result
