@@ -1,0 +1,22 @@
+WITH All_Books AS (
+
+SELECT analytics_reporting.books.book_id,
+        SUM(CASE WHEN reading_duration_minutes IS NULL THEN 0 ELSE reading_duration_minutes END) AS reading_minutes,
+        COUNT(DISTINCT(analytics_reporting.reading_activity_daily.user_id)) AS unique_users,
+        COUNT(analytics_reporting.reading_activity_daily.book_id) AS book_opened
+FROM analytics_reporting.books 
+LEFT JOIN analytics_reporting.reading_activity_daily ON analytics_reporting.reading_activity_daily.book_id = analytics_reporting.books.book_id
+WHERE currently_activated = 'Y'
+GROUP BY analytics_reporting.books.book_id
+),
+
+Grouped_Book_Views AS (
+SELECT book_id, SUM(unique_first_views) AS book_views_via_google 
+FROM "reporting_layer"."view_book_views_via_google" 
+WHERE book_id IN (SELECT book_id FROM All_Books)
+GROUP BY book_id)
+
+SELECT All_Books.*, CASE WHEN Book_Views_Via_Google IS NULL THEN 0 ELSE Book_Views_Via_Google END AS book_views_via_google
+FROM All_Books
+LEFT JOIN Grouped_Book_Views ON Grouped_Book_Views.book_id = All_Books.book_id
+ORDER BY reading_minutes DESC, unique_users DESC, Book_Opened DESC, Book_Views_Via_Google DESC 
