@@ -1,0 +1,142 @@
+/* Create Week Calendar Table - Filter to start 2019 and current date */
+WITH MonthTable AS
+    (SELECT DATEDIFF(Month, '2017-01-01', calendar_date) AS MonthNumber,
+       MIN(calendar_date) AS MonthStartDate,
+       MAX(calendar_date) AS MonthEndDate
+FROM reporting_layer.ref_calendar_day
+WHERE calendar_date >= '2017-01-01' and calendar_date <= getdate()
+GROUP BY DATEDIFF(Month, '2017-01-01', calendar_date)),
+
+     /* Paid Subscribers -or Active B2B subscribers */
+SubscriberCount AS (
+SELECT MonthTable.*, s.user_id, s.payment_channel, s.start_timestamp, end_timestamp
+from reporting.subscriptions s
+join MonthTable on
+    (s.start_timestamp between MonthTable.MonthStartDate and MonthTable.MonthEndDate)
+or (s.start_timestamp < MonthTable.MonthStartDate and s.end_timestamp > MonthStartDate)
+WHERE subscription_type = 'subscribed'
+and (MonthStartDate = '2020-12-01' or MonthStartDate = '2021-12-01')
+AND (s.payment_channel = 'indirect' or s.paid_months > 0)
+AND user_id IN (SELECT user_id from reporting.user_registrations where internal_user = 'N'))
+
+/* 2020 reading stats  */
+
+select 
+count(*) as records, sum(time_spent_minutes) as total_time,
+sum(time_spent_minutes) as total_time_mins, count(distinct(SubscriberCount.user_id)) as unique_users,
+round(1.0*(count(*)) / count(distinct(SubscriberCount.user_id)), 1) as average_books_per_user,
+round(sum(1.0*(time_spent_minutes)) / count(distinct(SubscriberCount.user_id)), 1) as avg_mins_reading_per_user
+from SubscriberCount
+left join reporting.reading_activity_monthly on reporting.reading_activity_monthly.user_id = SubscriberCount.user_id
+where period_start >= '2019-12-01' and period_start < '2020-12-01'
+and MonthStartDate = '2020-12-01'
+
+
+/* Filter to particular year */
+
+SELECT MonthStartDate, count(*)
+FROM SubscriberCount
+group by MonthStartDate
+
+----------
+ /* all users 2020 & 2021  */
+ 
+ /* Create Week Calendar Table - Filter to start 2019 and current date */
+WITH MonthTable AS
+    (SELECT DATEDIFF(Month, '2017-01-01', calendar_date) AS MonthNumber,
+       MIN(calendar_date) AS MonthStartDate,
+       MAX(calendar_date) AS MonthEndDate
+FROM reporting_layer.ref_calendar_day
+WHERE calendar_date >= '2017-01-01' and calendar_date <= getdate()
+GROUP BY DATEDIFF(Month, '2017-01-01', calendar_date)),
+
+     /* Paid Subscribers -or Active B2B subscribers */
+SubscriberCount AS (
+SELECT MonthTable.*, s.user_id, s.payment_channel, s.start_timestamp, end_timestamp
+from reporting.subscriptions s
+join MonthTable on
+    (s.start_timestamp between MonthTable.MonthStartDate and MonthTable.MonthEndDate)
+or (s.start_timestamp < MonthTable.MonthStartDate and s.end_timestamp > MonthStartDate)
+WHERE subscription_type = 'subscribed'
+and (MonthStartDate = '2020-12-01' or MonthStartDate = '2021-12-01')
+AND (s.payment_channel = 'indirect' or s.paid_months > 0)
+AND user_id IN (SELECT user_id from reporting.user_registrations where internal_user = 'N'))
+
+ 
+select count(*) as books_read ,sum(time_spent_minutes) / 525600 as years_read
+from reporting.reading_activity_monthly
+where period_start >= '2019-12-01' and period_end < '2020-12-01'
+and user_id in (select user_id from SubscriberCount where MonthStartDate = '2020-12-01')
+
+
+----------
+/* Chapters  */
+
+ 
+ /* Create Week Calendar Table - Filter to start 2019 and current date */
+WITH MonthTable AS
+    (SELECT DATEDIFF(Month, '2017-01-01', calendar_date) AS MonthNumber,
+       MIN(calendar_date) AS MonthStartDate,
+       MAX(calendar_date) AS MonthEndDate
+FROM reporting_layer.ref_calendar_day
+WHERE calendar_date >= '2017-01-01' and calendar_date <= getdate()
+GROUP BY DATEDIFF(Month, '2017-01-01', calendar_date)),
+
+     /* Paid Subscribers -or Active B2B subscribers */
+SubscriberCount AS (
+SELECT MonthTable.*, s.user_id, s.payment_channel, s.start_timestamp, end_timestamp
+from reporting.subscriptions s
+join MonthTable on
+    (s.start_timestamp between MonthTable.MonthStartDate and MonthTable.MonthEndDate)
+or (s.start_timestamp < MonthTable.MonthStartDate and s.end_timestamp > MonthStartDate)
+WHERE subscription_type = 'subscribed'
+and (MonthStartDate = '2020-12-01' or MonthStartDate = '2021-12-01')
+AND (s.payment_channel = 'indirect' or s.paid_months > 0)
+AND user_id IN (SELECT user_id from reporting.user_registrations where internal_user = 'N'))
+
+select count(*) as chapters_read
+from reporting.reading_activity_daily
+where reading_date >= '2020-12-01' and reading_date < '2021-12-01'
+and user_id in (select user_id from SubscriberCount where MonthStartDate = '2021-12-01')
+
+/* Notes written  */
+
+ /* Create Week Calendar Table - Filter to start 2019 and current date */
+WITH MonthTable AS
+    (SELECT DATEDIFF(Month, '2017-01-01', calendar_date) AS MonthNumber,
+       MIN(calendar_date) AS MonthStartDate,
+       MAX(calendar_date) AS MonthEndDate
+FROM reporting_layer.ref_calendar_day
+WHERE calendar_date >= '2017-01-01' and calendar_date <= getdate()
+GROUP BY DATEDIFF(Month, '2017-01-01', calendar_date)),
+
+     /* Paid Subscribers -or Active B2B subscribers */
+SubscriberCount AS (
+SELECT MonthTable.*, s.user_id, s.payment_channel, s.start_timestamp, end_timestamp
+from reporting.subscriptions s
+join MonthTable on
+    (s.start_timestamp between MonthTable.MonthStartDate and MonthTable.MonthEndDate)
+or (s.start_timestamp < MonthTable.MonthStartDate and s.end_timestamp > MonthStartDate)
+WHERE subscription_type = 'subscribed'
+and (MonthStartDate = '2020-12-01' or MonthStartDate = '2021-12-01')
+AND (s.payment_channel = 'indirect' or s.paid_months > 0)
+AND user_id IN (SELECT user_id from reporting.user_registrations where internal_user = 'N'))
+
+select count(*) as annotations_count
+from reporting.book_annotations
+where created_timestamp >= '2020-12-01' and created_timestamp < '2021-12-01'
+and user_id in (select user_id from SubscriberCount where MonthStartDate = '2021-12-01')
+
+/* books on platform  */
+
+select count(*), count(distinct(publisher_name))
+from reporting.books
+where currently_activated = 'Y'
+
+/* top 3 books  */
+
+select *
+from reading_activity_monthly 
+
+
+
