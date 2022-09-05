@@ -1,0 +1,151 @@
+/* Find users who have paused a subscription twice - counting distinct days to avoid dupkicate record issue - subscriptions_paused only shows latest user action - so need to record pre events with tracking db  */
+
+WITH Event_Tracking_Sub_Paused AS (
+SELECT user_id, 
+       MIN(event_timestamp) AS Event_Tracking_First_Requested_Paused_Date,
+       MAX(event_timestamp) AS Event_Tracking_Last_Paused_Date,
+       COUNT(DISTINCT(CAST(event_timestamp as date))) AS Event_Tracking_Times_Subscription_Paused
+FROM analytics_reporting.user_tracking_events
+WHERE user_id IN (SELECT userid 
+                  FROM "prodgluegoldbuckets3database"."subscriptions_paused")
+and event_name = 'subscription paused'
+GROUP BY user_id),
+
+/* find latest associated trial for that user - as in some reactivation cases they are reactivated with a trial, so need to know how many days to add to reactivation date untill reactivation payment is expected - find all trials then filter to last one  */
+
+Trial_Results AS (
+SELECT user_id, start_timestamp, end_timestamp, ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY start_timestamp DESC) AS Last_Recorded_Trial 
+FROM analytics_reporting.subscriptions 
+WHERE user_id IN (SELECT userid 
+                  FROM "prodgluegoldbuckets3database"."subscriptions_paused")
+AND subscription_type = 'trial'),
+
+Latest_Trial_Result AS (
+SELECT user_id, start_timestamp as last_trial_start_date, date_diff('day', start_timestamp, end_timestamp) AS Trial_Days 
+FROM Trial_Results
+WHERE Last_Recorded_Trial = 1),
+
+/* Combine to event tracking & latest trial date to main table - as all users in subscription paused should be present in both tables  */
+Pre_Reactivation_Data AS (
+SELECT Paused_Subs.*,  
+       Event_Tracking_First_Requested_Paused_Date, 
+       Event_Tracking_Times_Subscription_Paused,
+       last_trial_start_date,
+       Trial_Days
+FROM "prodgluegoldbuckets3database"."subscriptions_paused" as Paused_Subs
+LEFT JOIN Event_Tracking_Sub_Paused ON Event_Tracking_Sub_Paused.user_id = Paused_Subs.userid 
+LEFT JOIN Latest_Trial_Result ON Latest_Trial_Result.user_id = Paused_Subs.userid),
+
+/* Find subscriptions and trials for users where the reactivation due date is on the same day or has passed - as some seem to have been reactivated a few hours before the due date - unable to join on subscription id as they are cancelled when it is paused*/
+
+Reactivated_Subscription AS (
+SELECT Pre_Reactivation_Data.userid, total_paid_gbp as reactivated_sub_gbp, subscription_canceled_at as reactivation_subscription_cancelled_at, start_timestamp as reactivation_subscription_start_date, 1 AS subscription_reactivated 
+FROM Pre_Reactivation_Data
+LEFT JOIN analytics_reporting.subscriptions ON Pre_Reactivation_Data.userid = analytics_reporting.subscriptions.user_id 
+WHERE subscription_type = 'subscribed'
+AND start_timestamp >= DATE_ADD('day', -1, reactivationdate)),
+
+/* find users who have a reactiovated trial - as depending on how they are reacvated they will have another trial and we should not expect a payment untill the new trial is complete */
+
+ReactivatedTrial AS (
+SELECT Pre_Reactivation_Data.userid, subscription_canceled_at as cancelled_during_reactivation_trial, start_timestamp as reactivation_trial_start_date, 1 AS trial_reactivated 
+FROM Pre_Reactivation_Data
+LEFT JOIN analytics_reporting.subscriptions ON Pre_Reactivation_Data.userid = analytics_reporting.subscriptions.user_id 
+WHERE subscription_type = 'trial'
+AND start_timestamp >= DATE_ADD('day', -1, reactivationdate)),
+
+/* Find last requsted subscription cancellation date - as they may have decided to cancel their orgional subscription before the reactivation  */
+
+Last_Cancellation_Date AS (
+SELECT user_id, MAX(subscription_canceled_at) AS Last_user_subscription_cancellation_date
+FROM analytics_reporting.subscriptions 
+WHERE user_id IN (SELECT userid FROM Pre_Reactivation_Data)
+and subscription_canceled_at IS NOT NULL
+GROUP BY user_id),
+
+/* record last successfull payment ot see if it was after the paused date - as some payments may re reassigned to the old subscritpion - include last payment to be part of reactivation income */
+
+Direct_Payments_Post_Reactivation_Income AS (
+SELECT user_id, 
+       SUM(paid_amount_gbp) AS post_actualpause_Income_d2c_table
+FROM Pre_Reactivation_Data
+INNER JOIN analytics_reporting.direct_user_payments ON analytics_reporting.direct_user_payments.user_id = Pre_Reactivation_Data.userid 
+WHERE paid_amount_gbp > 0
+AND invoice_date >= actualpauseddate
+GROUP BY user_id),
+
+/* join both reactivated subscriptions and tirals to main reporting table  */
+
+Reactivation_Data_added AS (
+SELECT Pre_Reactivation_Data.*, CASE WHEN reactivated_sub_gbp IS NULL THEN 0 ELSE reactivated_sub_gbp END AS reactivated_sub_gbp, 
+                                reactivation_subscription_cancelled_at, 
+                                reactivation_subscription_start_date, 
+                                subscription_reactivated,
+                                cancelled_during_reactivation_trial, 
+                                reactivation_trial_start_date, 
+                                trial_reactivated, 
+                                Last_user_subscription_cancellation_date, 
+                                CASE WHEN post_actualpause_Income_d2c_table IS NULL THEN 0 ELSE post_actualpause_Income_d2c_table END AS post_actualpause_Income_d2c_table
+FROM Pre_Reactivation_Data
+LEFT JOIN Reactivated_Subscription ON Reactivated_Subscription.userid = Pre_Reactivation_Data.userid 
+LEFT JOIN ReactivatedTrial ON ReactivatedTrial.userid = Pre_Reactivation_Data.userid
+LEFT JOIN Last_Cancellation_Date ON Last_Cancellation_Date.user_id = Pre_Reactivation_Data.userid
+LEFT JOIN Direct_Payments_Post_Reactivation_Income ON Direct_Payments_Post_Reactivation_Income.user_id = Pre_Reactivation_Data.userid),
+
+/* Find associated reactivation refunds - find latest currency rate to get accurate refunded gbp amount - join to invoice line items to match new subscription id with user  */
+
+latest_currency_rate as (
+         select lower(currency) as lower_case_currency, rate,
+                row_number() over (partition by currency order by date desc) as currency_row_num
+         from "prodgluegoldbuckets3database"."currency_exchange_rates"
+     ),
+
+/* mark refunded users - only refunds after the actual pause date */
+Refund_Users AS (
+    SELECT user_id, 1 as refund_user,
+    SUM(CASE WHEN charges.currency = 'gbp' THEN (amount_refunded / 100) ELSE ((amount_refunded / rate) / 100) END) as refunded_total_gbp
+    FROM "prodgluegoldbuckets3database"."charges"
+    LEFT JOIN latest_currency_rate ON latest_currency_rate.lower_case_currency = "prodgluegoldbuckets3database"."charges".currency
+    INNER JOIN Reactivation_Data_added ON Reactivation_Data_added.userid = "prodgluegoldbuckets3database"."charges".user_id 
+    WHERE refunded = true
+    AND (currency_row_num = 1 or currency_row_num IS NULL)
+    AND refund_created >= actualpauseddate
+    GROUP BY user_id
+),
+
+/* mark case statments showing user status */
+
+Case_Statements_Added AS (
+SELECT *, 
+         CASE WHEN actualpauseddate > current_date THEN 'Pause Requested'
+              WHEN actualpauseddate <= current_date AND reactivationdate > current_date THEN 'User Paused Waiting Reactivation Date'
+              WHEN reactivationdate <= current_date AND (subscription_reactivated = 1 AND reactivated_sub_gbp >= 0) OR (post_actualpause_Income_d2c_table > 0) OR trial_reactivated = 1 THEN 'User Subscription Reactivated' 
+              WHEN reactivationdate <= current_date AND Last_user_subscription_cancellation_date <= reactivationdate AND Last_user_subscription_cancellation_date >= actualpauseddate THEN 'Cancelled Before Reactivation' 
+              
+              ELSE 'Unknown' END AS User_Status,
+              
+              CASE WHEN reactivationdate <= current_date THEN 1 ELSE 0 END AS Past_Reactivation_Date 
+              
+FROM Reactivation_Data_added
+LEFT JOIN Refund_Users ON Refund_Users.user_id = Reactivation_Data_added.userid)
+
+
+SELECT 
+       COUNT(DISTINCT(userid)) AS All_Paused_Users, 
+       SUM(CASE WHEN User_Status = 'Pause Requested' THEN 1 ELSE 0 END) AS Pause_Requested,
+       SUM(CASE WHEN User_Status = 'User Paused Waiting Reactivation Date' THEN 1 ELSE 0 END) AS Currently_Paused,
+       SUM(CASE WHEN extended = true THEN 1 ELSE 0 END) AS Pause_Extended, 
+       SUM(CASE WHEN User_Status = 'User Subscription Reactivated' THEN 1 ELSE 0 END) AS Reactivate_Subscription,
+       SUM(CASE WHEN User_Status = 'Cancelled Before Reactivation' and refund_user is null THEN 1 ELSE 0 END) AS Reactivate_Subscription_Cancelled,
+       SUM(CASE WHEN User_Status = 'Cancelled Before Reactivation' THEN refund_user ELSE 0 END) AS Reactivate_Subscription_Refunded,
+       
+       SUM(CASE WHEN User_Status = 'Cancelled Before Reactivation' THEN refunded_total_gbp ELSE 0 END) AS Refunded_Income,
+       
+       SUM(Past_Reactivation_Date) AS Past_Reactivation_Date,
+       SUM(CASE WHEN User_Status = 'Unknown' THEN 1 ELSE 0 END) AS Unknown_Status,
+       
+       SUM(reactivated_sub_gbp) + SUM(post_actualpause_Income_d2c_table) AS Total_Reactivated_Subscription_Income
+       
+       FROM Case_Statements_Added
+
+
