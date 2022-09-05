@@ -1,0 +1,53 @@
+WITH URL_Filter AS (
+SELECT user_id, event_name, current_url, CAST(record_date as date) AS Event_Date,
+       CAST(substr(current_url, 38, 6) as int) AS List_ID
+FROM event_tracking 
+WHERE user_id IS NOT NULL 
+AND (current_url like '%302410%' or 
+     current_url like '%302402%' or
+     current_url like '%302401%' or
+     current_url like '%302393%' or
+     current_url like '%302383%')
+AND current_url like '%list%'
+AND year IN ('2020', '2021', '2022')
+and user_id not in (select id from users where email like '%perlego%')),
+
+/* group how many times results have been seen on a daily basis - so that the reading list card click can be joined together
+will say that if user id views the same */
+
+URL_Grouped AS (
+SELECT user_id, List_ID, Event_Date, COUNT(*) AS List_Views, 'URL_Match' AS Status
+FROM URL_Filter
+GROUP BY user_id, List_ID, Event_Date)
+
+select *
+from URL_grouped 
+
+/* update - all reading lists - 15th august 2022 */
+
+WITH URL_Filter AS (
+SELECT user_id, event_name, current_url, 
+      CAST(record_date as date) AS Event_Date, 
+      year as view_year,
+      substr(current_url, 38, length(current_url)) as url_first_part_removed
+FROM event_tracking 
+WHERE (current_url like '%/reading-list%')
+AND year IN ('2020', '2021', '2022')
+and (user_id not in (select id from users where email like '%perlego%') or user_id is null)),
+
+/* find extracted list id for all curated lists */
+extracted_listid_table as (
+select *, position('/' in url_first_part_removed), substr(url_first_part_removed, 1, position('/' in url_first_part_removed) - 1) as extracted_list_id
+from URL_Filter)
+
+SELECT extracted_list_id, view_year, 
+       COUNT(*) AS Total_Views, 
+       SUM(CASE WHEN user_id is NOT NULL THEN 1 ELSE 0 END) AS Perlego_Views, 
+       COUNT(DISTINCT(user_id)) AS Unique_Perlego_Users
+FROM extracted_listid_table
+GROUP BY extracted_list_id, view_year
+
+
+
+
+
