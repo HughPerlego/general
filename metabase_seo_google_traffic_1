@@ -1,0 +1,41 @@
+with registration_check as (
+SELECT referrer_book,
+       COUNT(*) AS total_users,
+       
+       SUM(CASE WHEN utm_medium = 'organic' then 1 else 0 end) AS Organic_User_account_creation,
+       SUM(CASE WHEN utm_medium = 'cpc' then 1 else 0 end) AS CPC_User_account_creation,
+       
+       SUM(CASE WHEN utm_medium = 'organic' and converted_trial = 'Y' then 1 else 0 end) AS Organic_User_trial_creation,
+       SUM(CASE WHEN utm_medium = 'cpc' and converted_trial = 'Y' then 1 else 0 end) AS CPC_User_trial_creation,
+       
+       SUM(CASE WHEN utm_medium = 'organic' and converted_subscribed = 'Y' then 1 else 0 end) AS Organic_User_subscription_creation,
+       SUM(CASE WHEN utm_medium = 'cpc' and converted_subscribed = 'Y' then 1 else 0 end) AS CPC_User_subscription_creation
+       
+FROM analytics_reporting.user_registrations
+WHERE referrer_book IS NOT NULL 
+AND registration_time >= {{Start_Date}} and registration_time <= {{End_Date}}
+AND payment_channel_crude = 'direct'
+GROUP BY referrer_book),
+
+grouped_referal_view as (
+SELECT book_id, sum(unique_first_views) AS Google_Referal_Views 
+from reporting_layer.view_book_views_via_google
+WHERE from_day >= {{Start_Date}} and from_day <= {{End_Date}}
+GROUP BY book_id
+)
+
+
+SELECT grouped_referal_view.book_id, book_title, publisher_name, subject_name, 
+       format, currently_activated ,grouped_referal_view.Google_Referal_Views,
+       CASE when Organic_User_account_creation is null then 0 else Organic_User_account_creation end as Organic_User_account_creation,
+       CASE WHEN CPC_User_account_creation is null then 0 else CPC_User_account_creation end as CPC_User_account_creation,
+       CASE WHEN Organic_User_trial_creation is null then 0 else Organic_User_trial_creation end as Organic_User_trial_creation,
+       CASE WHEN CPC_User_trial_creation is null then 0 else CPC_User_trial_creation end as CPC_User_trial_creation,
+       CASE WHEN Organic_User_subscription_creation is null then 0 else Organic_User_subscription_creation end as Organic_User_subscription_creation,
+       CASE WHEN CPC_User_subscription_creation is null then 0 else CPC_User_subscription_creation end as CPC_User_subscription_creation
+FROM grouped_referal_view
+LEFT JOIN registration_check ON registration_check.referrer_book = grouped_referal_view.book_id
+LEFT JOIN analytics_reporting.books on analytics_reporting.books.book_id = grouped_referal_view.book_id
+WHERE {{Book_Title}}
+AND {{Publisher}}
+
