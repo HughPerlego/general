@@ -1,0 +1,143 @@
+/* Tests started in December 2021 - so pull users who joined after that - with no registered country
+   catch those assigned a test but have not inputted the data*/
+
+WITH Joined_After_December AS (
+    SELECT *
+    FROM prodgluegoldbuckets3database.users
+    WHERE date_joined >= cast('2022-01-01' as date)
+),
+
+/* Extract all users with VWO campaign Info - mark name of test in json string */
+
+User_VWO_Campaign AS (
+    SELECT user_id, event_properties, 
+           json_array_get(json_extract(event_properties, '$.vwoCampaignInfo'),0) AS Campaign_Info
+    FROM prodgluegoldbuckets3database.event_tracking
+    WHERE user_id IN (SELECT id from Joined_After_December)
+    AND event_name IN ('subscription creation')
+    AND record_date >= cast('2022-01-01' as date) and record_date < cast('2022-08-30' as date)
+    and json_array_get(json_extract(event_properties, '$.vwoCampaignInfo'),0) is not null
+),
+
+  User_VWO_Campaign_group AS (
+      SELECT user_id, Campaign_Info
+      FROM User_VWO_Campaign
+      GROUP BY user_id, Campaign_Info),
+
+/* group user registrations table due to different country produing virtual duplicates */
+
+     Grouped_User_registrations AS (
+SELECT user_id, user_region, acquisition_region, registration_time ,
+           payment_channel_crude, geo_location, utm_medium, utm_source, utm_campaign
+FROM analytics_reporting.user_registrations
+WHERE internal_user = 'N'
+GROUP BY user_id, user_region, acquisition_region, registration_time ,
+           payment_channel_crude, geo_location, utm_medium, utm_source, utm_campaign),
+
+/* Combine to grouped user registration table */
+
+Combined_User_Registration_Table AS (
+    SELECT Grouped_User_registrations.user_id, user_region, acquisition_region, registration_time ,
+           payment_channel_crude, geo_location, utm_medium, utm_source, utm_campaign, Campaign_Info
+    FROM Grouped_User_registrations
+    INNER JOIN User_VWO_Campaign_group ON User_VWO_Campaign_group.user_id = Grouped_User_registrations.user_id
+    ),
+/* Create Subscription Table - join to prod.subscriptions to get plan id   */
+
+Filtered_Subscription_Table AS (
+SELECT user_id, start_timestamp AS Subscription_Start_Date, paid_end_timestamp, subscribed_months,
+       subscription_canceled_at, total_paid_gbp, 1 AS Subscribed, discounted_months,
+       CASE WHEN paid_start_timestamp IS NOT NULL THEN 1 ELSE NULL END AS Paid_Subscriber,
+       ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY start_timestamp DESC) AS User_Subscritpion_Count,
+       src_sub_category_id AS Subscription_PlanID,
+       date_trunc('month', start_timestamp) as Subscription_Start_cohort
+FROM analytics_reporting.subscriptions
+WHERE user_id IN (SELECT user_id
+                  FROM Combined_User_Registration_Table)
+AND subscription_type IN('subscribed', 'Void')),
+
+   Filtered_Subscription_Table_Cut AS (
+       SELECT *
+       FROM Filtered_Subscription_Table
+       WHERE User_Subscritpion_Count = 1),
+
+/* Mark user trial periods */
+Trial_Period AS (
+    SELECT user_id, start_timestamp AS Trial_start_date, end_timestamp AS Trial_end_date, 1 AS Trial_User,
+           sub_category_name, src_sub_category_id AS Trial_PlanID, sub_category_name AS reporting_plan_name,
+           ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY start_timestamp DESC) AS Trial_user_order
+    FROM analytics_reporting.subscriptions
+    WHERE subscription_type = 'trial'
+    AND user_id IN (SELECT user_id FROM Combined_User_Registration_Table)
+),
+
+Trial_Period_Filter AS (
+SELECT *
+FROM Trial_Period
+WHERE Trial_user_order = 1),
+
+/* Combine Trial & subscription tables - mark reporting plan id - subscription plan - if not then it's the one selected
+   during the trial period*/
+
+Main_Table AS (
+    SELECT Combined_User_Registration_Table.*, Trial_start_date, Trial_end_date, Trial_User,
+    Subscribed, Subscription_Start_Date, paid_end_timestamp, subscribed_months, subscription_canceled_at,
+    total_paid_gbp, reporting_plan_name, discounted_months, Paid_Subscriber, Subscription_Start_cohort,
+           CASE WHEN Subscription_PlanID IS NOT NULL THEN Subscription_PlanID ELSE Trial_PlanID END AS Reporting_PlanID
+    FROM Combined_User_Registration_Table
+    LEFT JOIN Filtered_Subscription_Table_Cut ON Filtered_Subscription_Table_Cut.user_id = Combined_User_Registration_Table.user_id
+    LEFT JOIN Trial_Period_Filter ON Trial_Period_Filter.user_id = Combined_User_Registration_Table.user_id
+),
+
+     /* grouped mot recent conversion */
+
+     latest_currency_rate as (
+         select lower(currency) as lower_case_currency, rate,
+                row_number() over (partition by currency order by date desc) as currency_row_num
+         from prodgluegoldbuckets3database.currency_exchange_rates
+     ),
+
+/* mark refunded users - mark rate as 1 for gbp*/
+Refund_Users AS (
+    SELECT user_id, 1 as refund_user, 
+    sum((amount / CASE WHEN prodgluegoldbuckets3database.charges.currency = 'gbp' THEN 1 ELSE rate END) / 100) as refunded_total_pounds
+    FROM prodgluegoldbuckets3database.charges
+    LEFT JOIN latest_currency_rate ON latest_currency_rate.lower_case_currency = prodgluegoldbuckets3database.charges.currency
+    WHERE refunded = true
+    AND (currency_row_num = 1 or currency_row_num is null)
+    AND user_id IN (SELECT user_id
+                      FROM Main_Table)
+    GROUP BY user_id),
+
+/* mark users who have churned and what reporting month they churned  */
+
+Final_Users AS (
+SELECT Main_Table.*, refund_user 
+FROM Main_Table
+LEFT JOIN Refund_Users ON Main_Table.user_id = Refund_Users.user_id
+WHERE Trial_start_date >= cast('2022-07-04' as date) and Trial_start_date <= cast('2022-07-29' as date) 
+AND Paid_Subscriber = 1 and refund_user is null),
+
+Mark_users as (
+SELECT *, row_number() over (partition by user_id order by month_start_date asc) as row_month_start
+FROM Final_Users
+CROSS JOIN "reference_tables"."ref_calendar_month"
+WHERE (trial_start_date <=  month_start_date or (trial_start_date >=  month_start_date and trial_start_date <= month_end_date))
+and paid_end_timestamp >= month_end_date
+ORDER BY user_id, month_start_date)
+
+select Subscription_Start_cohort, Reporting_PlanID, Campaign_Info, row_month_start, count(*) as still_subscribed 
+from Mark_users 
+group by Subscription_Start_cohort, Reporting_PlanID, Campaign_Info, row_month_start
+
+
+
+
+
+
+
+
+
+
+
+
