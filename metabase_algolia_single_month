@@ -1,0 +1,31 @@
+WITH Month_data AS (
+
+SELECT book_id,
+SUM(reading_duration_minutes) AS reading_minutes,
+COUNT(DISTINCT(analytics_reporting.reading_activity_daily.user_id)) AS unique_users,
+COUNT(analytics_reporting.reading_activity_daily.book_id) AS book_opened
+from analytics_reporting.reading_activity_daily
+where reading_date >= CAST('2022-07-01' as date) and reading_date < cast('2022-08-01' as date)
+GROUP BY book_id),
+
+Month_read_records as (
+SELECT analytics_reporting.books.book_id, 
+       CASE WHEN reading_minutes IS NULL THEN 0 ELSE reading_minutes END AS reading_minutes,
+       CASE WHEN unique_users IS NULL THEN 0 ELSE unique_users END AS unique_users,
+       CASE WHEN book_opened IS NULL THEN 0 ELSE book_opened END AS book_opened
+FROM analytics_reporting.books 
+LEFT JOIN Month_data ON Month_data.book_id = analytics_reporting.books.book_id 
+WHERE currently_activated = 'Y'),
+
+Grouped_Book_Views AS (
+SELECT book_id, SUM(unique_first_views) AS book_views_via_google 
+FROM "reporting_layer"."view_book_views_via_google" 
+WHERE book_id IN (SELECT book_id FROM Month_data)
+AND from_day >= CAST('2022-07-01' as date) and from_day < CAST('2022-08-01' as date)
+GROUP BY book_id)
+
+
+SELECT Month_read_records.*, CASE WHEN book_views_via_google IS NULL THEN 0 ELSE book_views_via_google END AS book_views_via_google
+FROM Month_read_records
+LEFT JOIN Grouped_Book_Views ON Grouped_Book_Views.book_id = Month_read_records.book_id 
+ORDER BY reading_minutes DESC, unique_users DESC, book_opened DESC, book_views_via_google DESC
