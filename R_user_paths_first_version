@@ -1,0 +1,523 @@
+setwd("/Users/hughwaters/Documents/Ad Hoc Data/Click Order/first session/B2C Path Analysis/Dec-March 2022")
+
+library(dplyr)
+library(ggplot2)
+library(zoo)
+library(stringr)
+
+# Read In Data ------------------------------------------------------------
+
+Data <- read.csv('User_Event_Data.csv')
+
+
+# cases where we have not recorded subscription creaton & onbaording question due to issues with tracking db - so we 
+# are going to assume the first two actions are subscription creation & onbaroding flow 
+
+Data <- filter(Data, grouped_event_name != 'subscription creation' & grouped_event_name != 'Onboarding Question')
+
+# create new number of recorded events 
+
+Data <- group_by(Data, user_id) %>%
+        mutate(Filtered_Group_Events_Num = rank(grouped_row_user_number))
+
+# Create Paths 
+
+Data <- arrange(Data, user_id, user_event_number)
+
+Data <- group_by(Data, user_id) %>%
+        mutate(Full_Path = paste(grouped_event_name, collapse = '>')) %>% ungroup()
+
+# Filter records to users who start on homepage or book cover click 
+
+Data <- mutate(Data, start_keep = ifelse(Filtered_Group_Events_Num == 1 & (grouped_event_name == 'HomePage' | grouped_event_name == 'book cover click'), 1, 0)) %>%
+        group_by(user_id) %>%
+        mutate(Filter_valid_start = max(start_keep)) %>%
+        ungroup() %>%
+        filter(Filter_valid_start == 1)
+
+# read in trial and sub activity 
+
+Books_Opened <- read.csv('books_opened.csv')
+
+Books_Opened$unique_trial_books <- na.fill(Books_Opened$unique_trial_books, 0)
+Books_Opened$trial_books_opened <- na.fill(Books_Opened$trial_books_opened, 0)
+Books_Opened$trial_seconds <- na.fill(Books_Opened$trial_seconds, 0)
+Books_Opened$unique_sub_books <- na.fill(Books_Opened$unique_sub_books, 0)
+Books_Opened$sub_books <- na.fill(Books_Opened$sub_time, 0)
+Books_Opened$sub_seconds <- na.fill(Books_Opened$sub_seconds, 0)
+
+Books_Opened_Select <- mutate(Books_Opened, trial_engagment = ifelse(trial_books_opened > 0, 1, 0),
+                              more_than_one_trial_book = ifelse(trial_books_opened > 1, 1, 0),
+                       sub_book_opened = ifelse(sub_books > 0, 1, 0)) %>%
+                       select(user_id, trial_engagment, sub_book_opened, more_than_one_trial_book)
+
+# combine to date per user_id - take max when summarising 
+
+Data <- merge.data.frame(Data, Books_Opened_Select, by = 'user_id', all.x = T)
+
+# simplify utm medium 
+
+Data <- mutate(Data, utm_medium = ifelse(utm_medium != 'cpc' & utm_medium != 'organic', 'other', utm_medium))
+
+# Paths -------------------------------------------------------------------
+
+# One events
+
+One_Path_Summary <- filter(Data, Filtered_Group_Events_Num <= 1) %>% 
+                    group_by(user_id) %>%
+                    mutate(One_Path = paste(grouped_event_name, collapse = '>')) %>%
+                    group_by(One_Path) %>% 
+                    mutate(subscribed = ifelse(converted_subscribed == 'Y', user_id, NA),
+                           paid = ifelse(converted_paid == 'Y', user_id, NA),
+                           trial_book_open = ifelse(trial_engagment == 1, user_id, NA),
+                           multiple_trial_book = ifelse(more_than_one_trial_book == 1, user_id, NA),
+                           sub_book_open = ifelse(sub_book_opened == 1, user_id, NA)) %>%
+                    summarise(Users = n_distinct(user_id), subscribed = n_distinct(subscribed),
+                              paid = n_distinct(paid),
+                              average_engagment_paid_subs = round(mean(avg_user_score, na.rm = T), 1),
+                              trial_reader_users = n_distinct(trial_book_open),
+                              multiple_trial_book = n_distinct(multiple_trial_book),
+                              sub_reader_users = n_distinct(sub_book_open)) %>%
+                    mutate(Percent_Paid = 100*(paid) / Users, 
+                           percent_sub_reader_users = 100*(sub_reader_users) / paid)
+
+#write.csv(One_Path_Summary, 'One_Path_Summary_Table.csv')
+
+# two paths 
+
+Data <- mutate(Data, First_event_Home = ifelse(Filtered_Group_Events_Num == 1 & grouped_event_name == 'HomePage', 1, 0)) %>%
+  group_by(user_id) %>%
+  mutate(First_Event_Homepage_view = max(First_event_Home)) %>% ungroup()
+
+
+# LOWEST engaged paths  ---------------------------------------------------
+
+
+# Three Path breakdowns - Overall 
+
+Five_Summary_Home_all <- filter(Data, Filtered_Group_Events_Num <= 5 & Filtered_Group_Events_Num >= 1) %>% 
+  group_by(First_Event_Homepage_view, user_id) %>%
+  mutate(One_Path = paste(grouped_event_name, collapse = '>')) %>%
+  group_by(First_Event_Homepage_view, One_Path) %>% 
+  mutate(subscribed = ifelse(converted_subscribed == 'Y', user_id, NA),
+         paid = ifelse(converted_paid == 'Y', user_id, NA),
+         trial_book_open = ifelse(trial_engagment == 1, user_id, NA),
+         multiple_trial_book = ifelse(more_than_one_trial_book == 1, user_id, NA),
+         sub_book_open = ifelse(sub_book_opened == 1, user_id, NA)) %>%
+  summarise(Users = n_distinct(user_id), subscribed = n_distinct(subscribed),
+            paid = n_distinct(paid),
+            average_engagment_paid_subs = round(mean(avg_user_score, na.rm = T), 1),
+            more_than_one_session = n_distinct(more_than_one_session),
+            trial_reader_users = n_distinct(trial_book_open),
+            multiple_trial_book = n_distinct(multiple_trial_book),
+            sub_reader_users = n_distinct(sub_book_open)) %>%
+  mutate(Percent_Paid = 100*(paid) / Users, 
+         percent_sub_reader_users = 100*(sub_reader_users) / paid) %>%
+  select(One_Path, Users, Percent_Paid, percent_sub_reader_users) 
+
+
+write.csv(Five_Summary_Home_all, 'Five_Summary_Home_all.csv')
+
+
+# Second Path Breakdowns  -------------------------------------------------
+
+Two_Path_Summary_Homepage <- filter(Data, Filtered_Group_Events_Num <= 2 & First_Event_Homepage_view == 1) %>% 
+                    group_by(user_id) %>%
+                    mutate(One_Path = paste(grouped_event_name, collapse = '>')) %>%
+                    group_by(One_Path) %>% 
+                    mutate(subscribed = ifelse(converted_subscribed == 'Y', user_id, NA),
+                           paid = ifelse(converted_paid == 'Y', user_id, NA),
+                           trial_book_open = ifelse(trial_engagment == 1, user_id, NA),
+                           multiple_trial_book = ifelse(more_than_one_trial_book == 1, user_id, NA),
+                           sub_book_open = ifelse(sub_book_opened == 1, user_id, NA))%>%
+                    summarise(Users = n_distinct(user_id), 
+                              subscribed = n_distinct(subscribed),
+                              paid = n_distinct(paid),
+                              trial_reader_users = n_distinct(trial_book_open),
+                              multiple_trial_book = n_distinct(multiple_trial_book),
+                              sub_reader_users = n_distinct(sub_book_open)) %>%
+                    mutate(Percent_Paid = 100*(paid) / Users, 
+                           percent_sub_reader_users = 100*(sub_reader_users) / paid,
+                           percent_read_trial = 100*(trial_reader_users) / Users,
+                           percent_read_trial_multiple = 100*(multiple_trial_book) / Users)
+
+ggplot(Two_Path_Summary_Homepage, aes(reorder(One_Path, Users), Users, fill = I('#3327EC')))+geom_col()+coord_flip()+theme_bw()+xlab('User Path')+ylab('Trial Users')+ggtitle('HomePage - Second Action')
+
+# book cover 
+
+Two_Path_Summary_Book_Cover <- filter(Data, Filtered_Group_Events_Num <= 2 & First_Event_Homepage_view == 0) %>% 
+  group_by(user_id) %>%
+  mutate(One_Path = paste(grouped_event_name, collapse = '>')) %>%
+  group_by(One_Path) %>% 
+  mutate(subscribed = ifelse(converted_subscribed == 'Y', user_id, NA),
+         paid = ifelse(converted_paid == 'Y', user_id, NA),
+         trial_book_open = ifelse(trial_engagment == 1, user_id, NA),
+         multiple_trial_book = ifelse(more_than_one_trial_book == 1, user_id, NA),
+         sub_book_open = ifelse(sub_book_opened == 1, user_id, NA))%>%
+  summarise(Users = n_distinct(user_id), 
+            subscribed = n_distinct(subscribed),
+            paid = n_distinct(paid),
+            trial_reader_users = n_distinct(trial_book_open),
+            multiple_trial_book = n_distinct(multiple_trial_book),
+            sub_reader_users = n_distinct(sub_book_open)) %>%
+  mutate(Percent_Paid = 100*(paid) / Users, 
+         percent_sub_reader_users = 100*(sub_reader_users) / paid,
+         percent_read_trial = 100*(trial_reader_users) / Users,
+         percent_read_trial_multiple = 100*(multiple_trial_book) / Users)
+
+ggplot(Two_Path_Summary_Book_Cover, aes(reorder(One_Path, Users), Users, fill = I('#3327EC')))+geom_col()+coord_flip()+theme_bw()+xlab('User Path')+ylab('Trial Users')+ggtitle('Book Cover - Second Action')
+
+# Three Path Breakdown ----------------------------------------------------
+
+# filter down to certain events to see spread as it goes - will build data into excel file 
+
+Overall_Summary <- filter(Data, Filtered_Group_Events_Num <= 1) %>% 
+  group_by(user_id) %>%
+  mutate(One_Path = paste(grouped_event_name, collapse = '>')) %>%
+  group_by(utm_medium, One_Path) %>% 
+  mutate(subscribed = ifelse(converted_subscribed == 'Y', user_id, NA),
+         paid = ifelse(converted_paid == 'Y', user_id, NA),
+         trial_book_open = ifelse(trial_engagment == 1, user_id, NA),
+         multiple_trial_book = ifelse(more_than_one_trial_book == 1, user_id, NA),
+         sub_book_open = ifelse(sub_book_opened == 1, user_id, NA))%>%
+  summarise(Users = n_distinct(user_id), 
+            subscribed = n_distinct(subscribed),
+            paid = n_distinct(paid),
+            trial_reader_users = n_distinct(trial_book_open),
+            multiple_trial_book = n_distinct(multiple_trial_book),
+            sub_reader_users = n_distinct(sub_book_open)) %>%
+  mutate(Percent_Paid = 100*(paid) / Users, 
+         percent_sub_reader_users = 100*(sub_reader_users) / paid,
+         percent_read_trial = 100*(trial_reader_users) / Users,
+         percent_read_trial_multiple = 100*(multiple_trial_book) / Users)
+
+
+Three_Path_Summary <- filter(Data, Filtered_Group_Events_Num <= 3 & First_Event_Homepage_view == 1) %>% 
+  group_by(user_id) %>%
+  mutate(One_Path = paste(grouped_event_name, collapse = '>')) %>%
+  group_by(One_Path) %>% 
+  mutate(subscribed = ifelse(converted_subscribed == 'Y', user_id, NA),
+         paid = ifelse(converted_paid == 'Y', user_id, NA),
+         trial_book_open = ifelse(trial_engagment == 1, user_id, NA),
+         multiple_trial_book = ifelse(more_than_one_trial_book == 1, user_id, NA),
+         sub_book_open = ifelse(sub_book_opened == 1, user_id, NA))%>%
+  summarise(Users = n_distinct(user_id), 
+            subscribed = n_distinct(subscribed),
+            paid = n_distinct(paid),
+            trial_reader_users = n_distinct(trial_book_open),
+            multiple_trial_book = n_distinct(multiple_trial_book),
+            sub_reader_users = n_distinct(sub_book_open)) %>%
+  mutate(Percent_Paid = 100*(paid) / Users, 
+         percent_sub_reader_users = 100*(sub_reader_users) / paid,
+         percent_read_trial = 100*(trial_reader_users) / Users,
+         percent_read_trial_multiple = 100*(multiple_trial_book) / Users)
+
+#write.csv(Overall_Summary, 'Overall_Summary.csv')
+
+
+
+
+
+
+
+
+# CPC Users - Event graph breakdown ---------------------------------------
+
+setwd('/Users/hughwaters/Documents/Ad Hoc Data/Click Order/first session/Grouped Events/Results')
+
+CPC_Paths <- filter(Data, Filtered_Group_Events_Num <= 4 & utm_medium == 'cpc') %>% 
+  group_by(user_id) %>%
+  mutate(One_Path = paste(grouped_event_name, collapse = '>')) %>%
+  group_by(utm_medium, One_Path) %>% 
+  mutate(subscribed = ifelse(converted_subscribed == 'Y', user_id, NA),
+         paid = ifelse(converted_paid == 'Y', user_id, NA),
+         trial_book_open = ifelse(trial_engagment == 1, user_id, NA),
+         multiple_trial_book = ifelse(more_than_one_trial_book == 1, user_id, NA),
+         sub_book_open = ifelse(sub_book_opened == 1, user_id, NA))%>%
+  summarise(Users = n_distinct(user_id), 
+            subscribed = n_distinct(subscribed),
+            paid = n_distinct(paid),
+            trial_reader_users = n_distinct(trial_book_open),
+            multiple_trial_book = n_distinct(multiple_trial_book),
+            sub_reader_users = n_distinct(sub_book_open)) %>%
+  select(utm_medium, One_Path, Users, paid, trial_reader_users, multiple_trial_book, sub_reader_users)
+
+write.csv(CPC_Paths, 'CPC_Paths.csv')
+
+# All paths ------------------------------------------
+
+AllPaths_Summary <- group_by(Data, user_id, Full_Path) %>%
+                                      mutate(Reading_Feature_Used = max(Reading_Feature_Event),
+                                             subscribed = ifelse(converted_subscribed == 'Y', user_id, NA),
+                                              paid = ifelse(converted_paid == 'Y', user_id, NA),
+                                              trial_book_open = ifelse(trial_engagment == 1, user_id, NA),
+                                              multiple_trial_book = ifelse(more_than_one_trial_book == 1, user_id, NA),
+                                              sub_book_open = ifelse(sub_book_opened == 1, user_id, NA)) %>%
+  group_by(Full_Path) %>%
+                                      summarise(Users = n_distinct(user_id),
+                                                sub_reader_users = n_distinct(sub_book_open),
+                                                paid = n_distinct(paid)) %>%
+  mutate(Paid_Percent = 100*(paid)/Users)
+
+
+
+AllPaths_Summary_5 <- filter(Data, Filtered_Group_Events_Num <= 5) %>% 
+                      group_by(user_id) %>%
+                      mutate(Four_Path = paste(grouped_event_name, collapse = '>')) %>%
+                      group_by(Four_Path) %>% 
+                      mutate(subscribed = ifelse(converted_subscribed == 'Y', user_id, NA),
+                             paid = ifelse(converted_paid == 'Y', user_id, NA),
+                             trial_book_open = ifelse(trial_engagment == 1, user_id, NA),
+                             multiple_trial_book = ifelse(more_than_one_trial_book == 1, user_id, NA),
+                             sub_book_open = ifelse(sub_book_opened == 1, user_id, NA))%>%
+                      summarise(Users = n_distinct(user_id), 
+                                subscribed = n_distinct(subscribed),
+                                paid = n_distinct(paid),
+                                trial_reader_users = n_distinct(trial_book_open),
+                                multiple_trial_book = n_distinct(multiple_trial_book),
+                                sub_reader_users = n_distinct(sub_book_open)) %>%
+                     mutate(Paid_Subscribers = 100*(paid) / Users,
+                            Subscriber_Read = 100*(sub_reader_users)/subscribed) %>%
+                     select(Four_Path, Users, Paid_Subscribers, Subscriber_Read, multiple_trial_book)
+
+
+AllPaths_Summary_5_home <- filter(Data, Filtered_Group_Events_Num <= 5 & First_Event_Homepage_view == 1) %>% 
+  group_by(user_id) %>%
+  mutate(Four_Path = paste(grouped_event_name, collapse = '>')) %>%
+  group_by(Four_Path) %>% 
+  mutate(subscribed = ifelse(converted_subscribed == 'Y', user_id, NA),
+         paid = ifelse(converted_paid == 'Y', user_id, NA),
+         trial_book_open = ifelse(trial_engagment == 1, user_id, NA),
+         multiple_trial_book = ifelse(more_than_one_trial_book == 1, user_id, NA),
+         sub_book_open = ifelse(sub_book_opened == 1, user_id, NA))%>%
+  summarise(Users = n_distinct(user_id), 
+            subscribed = n_distinct(subscribed),
+            paid = n_distinct(paid),
+            trial_reader_users = n_distinct(trial_book_open),
+            multiple_trial_book = n_distinct(multiple_trial_book),
+            sub_reader_users = n_distinct(sub_book_open)) %>%
+  mutate(Paid_Subscribers = 100*(paid) / Users,
+         Subscriber_Read = 100*(sub_reader_users)/subscribed) %>%
+  select(Four_Path, Users, Paid_Subscribers, Subscriber_Read, multiple_trial_book)
+          
+write.csv(AllPaths_Summary_5, 'AllPaths_Summary_5.csv')
+
+# Cancel users  -----------------------------------------------------------
+
+Users_utm_selection <- group_by(Data, utm_medium) %>%
+  summarise(Users = n_distinct(user_id))
+
+
+Users_Cancel_Section <- filter(Data, grouped_event_name == 'Subscription Cancel') %>% group_by(utm_medium) %>%
+  summarise(Users = n_distinct(user_id))
+
+
+Users_Cancel_Paths <- filter(Data, grouped_event_name == 'Subscription Cancel' & Filtered_Group_Events_Num <= 10) %>%
+                      group_by(Full_Path) %>%
+                      summarise(Users = n_distinct(user_id))
+
+write.csv(Users_Cancel_Paths, 'Users_Cancel_Paths.csv')
+
+# Habit Readers -----------------------------------------------------------
+
+Habit_Readers <- read.csv('habit_readers.csv')
+Habit_Readers <- filter(Habit_Readers, grouped_event_name != 'subscription creation' & grouped_event_name != 'Onboarding Question')
+
+# create new number of recorded events 
+
+Habit_Readers <- group_by(Habit_Readers, user_id) %>%
+  mutate(Filtered_Group_Events_Num = rank(grouped_row_user_number))
+
+# Create Paths 
+
+Habit_Readers <- arrange(Habit_Readers, user_id, user_event_number)
+
+Habit_Readers <- group_by(Habit_Readers, user_id) %>%
+  mutate(Full_Path = paste(grouped_event_name, collapse = '>')) %>% ungroup()
+
+# more than one session 
+
+Habit_Readers <- mutate(Habit_Readers, more_than_one_session = ifelse(unique_sessions_per_user > 1, user_id, NA))
+
+# Filter records to users who start on homepage or book cover click 
+
+Habit_Readers <- mutate(Habit_Readers, start_keep = ifelse(Filtered_Group_Events_Num == 1 & (grouped_event_name == 'HomePage' | grouped_event_name == 'book cover click'), 1, 0)) %>%
+  group_by(user_id) %>%
+  mutate(Filter_valid_start = max(start_keep)) %>%
+  ungroup() %>%
+  filter(Filter_valid_start == 1)
+
+# read in trial and sub activity 
+
+Books_Opened_habit <- read.csv('books_open_habit.csv')
+
+Books_Opened_habit$unique_trial_books <- na.fill(Books_Opened_habit$unique_trial_books, 0)
+Books_Opened_habit$trial_books_opened <- na.fill(Books_Opened_habit$trial_books_opened, 0)
+Books_Opened_habit$trial_seconds <- na.fill(Books_Opened_habit$trial_seconds, 0)
+Books_Opened_habit$unique_sub_books <- na.fill(Books_Opened_habit$unique_sub_books, 0)
+Books_Opened_habit$sub_books <- na.fill(Books_Opened_habit$sub_time, 0)
+Books_Opened_habit$sub_seconds <- na.fill(Books_Opened_habit$sub_seconds, 0)
+
+Books_Opened_Select <- mutate(Books_Opened_habit, trial_engagment = ifelse(trial_books_opened > 0, 1, 0),
+                              more_than_one_trial_book = ifelse(trial_books_opened > 1, 1, 0),
+                              sub_book_opened = ifelse(sub_books > 0, 1, 0)) %>%
+  select(user_id, trial_engagment, sub_book_opened, more_than_one_trial_book)
+
+# combine to date per user_id - take max when summarising 
+
+Habit_Readers <- merge.data.frame(Habit_Readers, Books_Opened_Select, by = 'user_id', all.x = T)
+
+# simplify utm medium 
+
+Habit_Readers <- mutate(Habit_Readers, utm_medium = ifelse(utm_medium != 'cpc' & utm_medium != 'organic', 'other', utm_medium))
+
+
+# One events
+
+One_Path_Summary <- filter(Habit_Readers, Filtered_Group_Events_Num <= 1) %>% 
+  group_by(user_activity, user_id) %>%
+  mutate(One_Path = paste(grouped_event_name, collapse = '>')) %>%
+  group_by(user_activity, One_Path) %>%
+  summarise(Users = n_distinct(user_id)) %>%
+  group_by(user_activity) %>%
+  mutate(Percent = 100*(Users) / sum(Users)) %>%
+  select(One_Path, user_activity, Percent) 
+
+library(tidyr)
+
+One_Path_Summary<- spread(One_Path_Summary, user_activity, Percent)
+
+
+# RFI ---------------------------------------------------------------------
+
+RFI_Readers <- read.csv('rfi_data.csv')
+RFI_Readers <- filter(RFI_Readers, grouped_event_name != 'subscription creation' & grouped_event_name != 'Onboarding Question')
+
+# create new number of recorded events 
+
+RFI_Readers <- group_by(RFI_Readers, user_id) %>%
+  mutate(Filtered_Group_Events_Num = rank(grouped_row_user_number))
+
+# Create Paths 
+
+RFI_Readers <- arrange(RFI_Readers, user_id, user_event_number)
+
+RFI_Readers <- group_by(RFI_Readers, user_id) %>%
+  mutate(Full_Path = paste(grouped_event_name, collapse = '>')) %>% ungroup()
+
+# Filter records to users who start on homepage or book cover click 
+
+RFI_Readers <- mutate(RFI_Readers, start_keep = ifelse(Filtered_Group_Events_Num == 1 & (grouped_event_name == 'HomePage' | grouped_event_name == 'book cover click'), 1, 0)) %>%
+  group_by(user_id) %>%
+  mutate(Filter_valid_start = max(start_keep)) %>%
+  ungroup() %>%
+  filter(Filter_valid_start == 1)
+
+
+RFI_Readers <- mutate(RFI_Readers, user_level = ifelse(user_average_score <= 5, 'low', NA),
+                      user_level = ifelse(user_average_score >= 11, 'high', user_level))
+
+# One events
+
+One_Path_Summary <- filter(RFI_Readers, Filtered_Group_Events_Num <= 1) %>% 
+                    group_by(user_level, user_id) %>%
+                    mutate(One_Path = paste(grouped_event_name, collapse = '>')) %>%
+                    group_by(user_level, One_Path) %>%
+                    summarise(Users = n_distinct(user_id)) %>%
+                    group_by(user_level) %>%
+                    mutate(Percent = 100*(Users) / sum(Users)) %>%
+                    select(One_Path, user_level, Percent) 
+
+library(tidyr)
+
+One_Path_Summary<- spread(One_Path_Summary, user_level, Percent)
+
+# Reading Features 
+
+Reading_Features <- c('highlight creation','copy text','bookmark creation', 'font size change',
+                      'book reference copied','change highlight colour','annotations tab clicked',
+                      'eye saver mode change','font family change','book shared', 'annotation creation',
+                      'highlight created', 'bookmark created', 'change font size', 'change eye saver mode',
+                      'create highlight')
+
+
+RFI_Readers <- mutate(RFI_Readers, Reading_Feature = ifelse(event_name == 'highlight creation' | event_name == 'create highlight' | event_name == 'highlight created' | event_name == 'change highlight colour' | event_name == 'highlight delete', 'Highlight', NA),
+                      Reading_Feature = ifelse(event_name == 'copy text', 'copy text', Reading_Feature),
+                      Reading_Feature = ifelse(event_name == 'book shared', 'book shared', Reading_Feature),
+                      Reading_Feature = ifelse(event_name == 'annotation creation' | event_name == 'annotation created', 'annotation creation', Reading_Feature),
+                      Reading_Feature = ifelse(event_name == 'bookmark created' | event_name == 'bookmark creation', 'bookmark creation', Reading_Feature),
+                      Reading_Feature = ifelse(event_name == 'change font size' | event_name == 'font size change' | event_name == 'font family change', 'font size', Reading_Feature),
+                      Reading_Feature = ifelse(event_name == 'change eye saver mode' | event_name == 'eyesaver mode button click' | event_name == 'eyesaver mode changed', 'eye saver mode', Reading_Feature))
+
+Reading_Feature_Summary <- group_by(RFI_Readers, user_level) %>% 
+                            filter(is.na(Reading_Feature) == F)  %>% 
+                            summarise(Users = n_distinct(user_id))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# B2C reading features ----------------------------------------------------
+
+
+Data <- mutate(Data, Reading_Feature = ifelse(event_name == 'highlight creation' | event_name == 'create highlight' | event_name == 'highlight created' | event_name == 'change highlight colour' | event_name == 'highlight delete', 'Highlight', NA),
+               Reading_Feature = ifelse(event_name == 'copy text', 'copy text', Reading_Feature),
+               Reading_Feature = ifelse(event_name == 'book shared', 'book shared', Reading_Feature),
+               Reading_Feature = ifelse(event_name == 'annotation creation' | event_name == 'annotation created', 'annotation creation', Reading_Feature),
+               Reading_Feature = ifelse(event_name == 'bookmark created' | event_name == 'bookmark creation', 'bookmark creation', Reading_Feature),
+               Reading_Feature = ifelse(event_name == 'change font size' | event_name == 'font size change' | event_name == 'font family change', 'font size', Reading_Feature),
+               Reading_Feature = ifelse(event_name == 'change eye saver mode' | event_name == 'eyesaver mode button click' | event_name == 'eyesaver mode changed', 'eye saver mode', Reading_Feature))
+
+Data <- mutate(Data, Reading_Feature_Used = ifelse(is.na(Reading_Feature) == F, 1, 0))
+
+Data <- group_by(Data, user_id) %>% mutate(User_Reading_Feature_Used = max(Reading_Feature_Used))
+
+Data <- mutate(Data, Reading_Binary = ifelse(grouped_event_name == 'Reading', 1, 0)) %>% 
+        group_by(user_id) %>%
+        mutate(Read_some_point = max(Reading_Binary))
+
+Reading_Path_Summary <- mutate(Data, subscribed = ifelse(converted_subscribed == 'Y', user_id, NA),
+                               paid = ifelse(converted_paid == 'Y', user_id, NA),
+                               trial_book_open = ifelse(trial_engagment == 1, user_id, NA),
+                               multiple_trial_book = ifelse(more_than_one_trial_book == 1, user_id, NA),
+                               sub_book_open = ifelse(sub_book_opened == 1, user_id, NA)) %>%
+                        filter(start_group_event_block == 'HomePage' | start_group_event_block == 'book cover click') %>%
+                        filter(Read_some_point == 1)%>%
+                        group_by(start_group_event_block, User_Reading_Feature_Used) %>% 
+                        summarise(Users = n_distinct(user_id), subscribed = n_distinct(subscribed),
+                                  paid = n_distinct(paid),
+                                  average_engagment_paid_subs = round(mean(avg_user_score, na.rm = T), 1),
+                                  trial_reader_users = n_distinct(trial_book_open),
+                                  multiple_trial_book = n_distinct(multiple_trial_book),
+                                  sub_reader_users = n_distinct(sub_book_open)) %>%
+                        mutate(Percent_Paid = 100*(paid) / Users, 
+                               percent_sub_reader_users = 100*(sub_reader_users) / paid)
+
+
+
+b <- mutate(Data, subscribed = ifelse(converted_subscribed == 'Y', user_id, NA),
+                               paid = ifelse(converted_paid == 'Y', user_id, NA),
+                               trial_book_open = ifelse(trial_engagment == 1, user_id, NA),
+                               multiple_trial_book = ifelse(more_than_one_trial_book == 1, user_id, NA),
+                               sub_book_open = ifelse(sub_book_opened == 1, user_id, NA)) %>%
+  filter(Read_some_point == 1)%>%
+  group_by(start_group_event_block, Reading_Feature) %>% 
+  summarise(Users = n_distinct(user_id), subscribed = n_distinct(subscribed),
+            paid = n_distinct(paid),
+            average_engagment_paid_subs = round(mean(avg_user_score, na.rm = T), 1),
+            trial_reader_users = n_distinct(trial_book_open),
+            multiple_trial_book = n_distinct(multiple_trial_book),
+            sub_reader_users = n_distinct(sub_book_open)) %>%
+  mutate(Percent_Paid = 100*(paid) / Users, 
+         percent_sub_reader_users = 100*(sub_reader_users) / paid)
+
+
