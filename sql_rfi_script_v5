@@ -1,0 +1,121 @@
+/* Work out main start / end subscription dates - only include subscribed users from 2020 onwards
+   Define cut off date which will be used at the last date the read record data can be reliabily read
+   Also limit to active subscribers only
+   */
+
+WITH Subscribe_Change AS (
+SELECT reporting.subscriptions.*,
+       CASE WHEN payment_channel = 'direct' AND paid_start_timestamp IS NOT NULL THEN paid_start_timestamp ELSE start_timestamp END AS Combined_Start_Date,
+       CASE WHEN payment_channel = 'direct' AND paid_end_timestamp IS NOT NULL THEN paid_end_timestamp ELSE end_timestamp END AS Combined_End_Date,
+       CAST('2021-10-31' as date) AS Cut_Off_Date
+    FROM reporting.subscriptions
+    WHERE reporting.subscriptions.subscription_type = 'subscribed'
+    AND start_timestamp >= '2017-01-01'
+    AND subscription_canceled_at IS NULL),
+
+ /* If end date is past cut off date then use cut off date as reference and add the number of months difference
+    from the start and cut off date - to get last reporting date that can be used for that user */
+
+Subscribers_Reporting AS (
+SELECT Subscribe_Change.*,
+
+       CASE WHEN Combined_End_Date >= Cut_Off_Date
+            OR (date_part(MONTH,Combined_End_Date) = date_part(MONTH,GETDATE())
+            AND date_part(YEAR,Combined_End_Date) = date_part(YEAR,GETDATE()))
+
+            THEN dateadd(month, DATEDIFF(month, combined_start_date, Cut_Off_Date) ,combined_start_date)
+
+            ELSE Combined_End_Date
+
+            END AS Reporting_End_Date
+FROM Subscribe_Change),
+
+/* Work out how many reporting months fit within the range - to use to estimate average per month */
+Reporting_Month_Cal AS (
+SELECT Subscribers_Reporting.*, DATEDIFF(MONTH, combined_start_date, reporting_end_date) AS Reporting_Months
+FROM Subscribers_Reporting),
+
+/* Filter to subscribers who have been subscribed for at least one full month */
+ Subscribers AS (
+     SELECT *
+     FROM Reporting_Month_Cal
+     WHERE Reporting_Months > 0),
+
+/* Frequency Calculation
+ Count active reading days per user & seconds read - within reporting period
+   Only include those with duration above 0 - so had to stay on the page for five seconds or longer*/
+Reading_Activity AS (
+SELECT prod.helper_rr_items.user_id,
+       Reporting_Months,
+       1.0* COUNT(DISTINCT (cast(record_date AS DATE))) AS Active_Reading_Days
+FROM prod.helper_rr_items
+INNER JOIN Subscribers ON Subscribers.user_id = prod.helper_rr_items.user_id
+WHERE record_date >= Subscribers.Combined_Start_Date AND record_date <= Subscribers.Reporting_End_Date
+AND duration > 0
+GROUP BY prod.helper_rr_items.user_id, Reporting_Months),
+
+
+
+
+
+
+
+
+
+
+
+
+/* Join Tables Together */
+
+Combined_User_Table AS (
+
+select prod.users.*,
+       Subscribers.Combined_Start_Date, Subscribers.Combined_End_Date,
+       Subscribers.Reporting_End_Date, Subscribers.Reporting_Months,
+       Subscribers.Cut_Off_Date,
+
+CASE WHEN Total_Reading_Days IS NULL THEN 0 ELSE Total_Reading_Days END AS Total_Reading_Days,
+CASE WHEN Total_Mins_Read IS NULL THEN 0 ELSE Total_Mins_Read END AS Total_Mins_Read,
+CASE WHEN AVG_Month_Reading_Days IS NULL THEN 0 ELSE AVG_Month_Reading_Days END AS AVG_Month_Reading_Days,
+CASE WHEN AVG_Month_Mins_Read IS NULL THEN 0 ELSE AVG_Month_Mins_Read END AS AVG_Month_Mins_Read,
+DATEDIFF(day, last_active, GETDATE()) AS Days_Since_Login,
+
+     CASE WHEN Days_Since_Login <= 7 THEN 4
+     WHEN Days_Since_Login > 7 AND Days_Since_Login <= 30 THEN 3
+     WHEN Days_Since_Login > 30 AND Days_Since_Login <= 90 THEN 2
+     WHEN Days_Since_Login > 90  THEN 1 ELSE NULL END AS Recency_Score,
+
+CASE WHEN AVG_Month_Reading_Days >= 5 THEN 4
+     WHEN AVG_Month_Reading_Days >= 2 AND AVG_Month_Reading_Days < 5 THEN 3
+     WHEN AVG_Month_Reading_Days > 0 AND AVG_Month_Reading_Days <= 2 THEN 2
+     WHEN AVG_Month_Reading_Days = 0  THEN 1 ELSE NULL END AS Frequency_Score,
+
+CASE WHEN AVG_Month_Mins_Read >= 60 THEN 4
+     WHEN AVG_Month_Mins_Read >= 10 AND AVG_Month_Mins_Read < 60 THEN 3
+     WHEN AVG_Month_Mins_Read > 0 AND AVG_Month_Mins_Read <= 10 THEN 2
+     WHEN AVG_Month_Mins_Read = 0  THEN 1 ELSE NULL END AS Intensity_Score
+
+FROM prod.users
+LEFT JOIN Reading_Activity_Average On Reading_Activity_Average.user_id = prod.users.id
+INNER JOIN Subscribers ON Subscribers.user_id = prod.users.id
+    WHERE Combined_End_Date >= '2021-10-01'),
+
+/* Output Main Table  */
+main_table as (
+SELECT id, Combined_Start_Date, Combined_End_Date, Reporting_End_Date ,last_active,
+       date_joined, user_type, Reporting_Months, organisation_id, Days_Since_Login,
+       AVG_Month_Mins_Read, AVG_Month_Reading_Days, Total_Reading_Days, Total_Mins_Read,
+       CASE WHEN organisation_id IS NULL THEN 'B2C' ELSE 'B2B' END AS User_Type_Desc,
+      (Recency_Score + Frequency_Score + Intensity_Score) as overall_score
+FROM Combined_User_Table)
+
+SELECT *
+FROM main_table
+
+
+
+
+
+
+
+
