@@ -1,0 +1,67 @@
+WITH User_table AS (
+SELECT user_id, converted_trial, converted_subscribed, currently_trialling, converted_paid, referrer_book
+FROM analytics_reporting.user_registrations 
+WHERE payment_channel_crude = 'direct'
+AND utm_medium = 'cpc'
+AND utm_source = 'google'
+AND registration_time >= CAST('2022-04-01' AS Date) and registration_time < CAST('2022-07-01' AS DATE)
+AND internal_user = 'N'
+AND referrer_book is not null 
+AND geo_location = 'US'
+AND converted_trial = 'Y'
+and currently_trialling = 'N'),
+
+Read_D1 AS (
+SELECT analytics_reporting.subscriptions.user_id, 1 AS Read_On_D1
+FROM analytics_reporting.subscriptions 
+LEFT JOIN analytics_reporting.reading_activity_daily ON analytics_reporting.reading_activity_daily.user_id = analytics_reporting.subscriptions.user_id
+WHERE subscription_type = 'trial'
+AND analytics_reporting.subscriptions.user_id in (SELECT user_id FROM User_table)
+AND date_diff('day', CAST(start_timestamp as date), reading_date) = 0
+GROUP BY analytics_reporting.subscriptions.user_id),
+
+/* find users who were given refunds  */
+
+Refunded_Users AS (
+SELECT User_id, COUNT(*) AS Refund_Count, SUM(amount) as Refunded_Amount, 1 AS Refund_User_Binary
+FROM "prodgluegoldbuckets3database"."charges"
+WHERE User_id in (SELECT User_id from User_table)
+AND Refunded = true
+GROUP BY User_id),
+
+/* join back to main table */
+Main_Reporting_Table AS (
+SELECT User_table.*, CASE WHEN Read_On_D1 IS NULL THEN 0 ELSE Read_On_D1 END AS Read_On_D1, 
+       CASE WHEN converted_subscribed = 'Y' THEN 1 ELSE 0 END AS Subscribed_Binary, 
+       CASE WHEN converted_paid = 'Y' THEN 1 ELSE 0 END AS Subscribed_Paid_Binary, 
+       CASE WHEN Refund_User_Binary IS NULL THEN 0 ELSE Refund_User_Binary END AS Refund_User_Binary
+FROM User_table
+LEFT JOIN Read_D1 ON Read_D1.User_id = User_table.User_id
+LEFT JOIN Refunded_Users ON Refunded_Users.user_id = User_table.user_id),
+
+/* grouped referrer book  */
+Grouped_Referrer_book AS (
+SELECT referrer_book, publisher_name, 
+       COUNT(*) AS Trial_Users, 
+       SUM(Read_On_D1) AS Read_D1,
+       SUM(Subscribed_Binary) AS Subscribed,
+       SUM(Subscribed_Paid_Binary) AS Paid_Subscriber,
+       SUM(Refund_User_Binary) AS Refunded_User 
+FROM Main_Reporting_Table
+LEFT JOIN analytics_reporting.books ON analytics_reporting.books.book_id = Main_Reporting_Table.referrer_book
+GROUP BY referrer_book, publisher_name),
+
+/* US Sales rights */
+
+US_Sales_Rights_Table AS (
+SELECT book_id, MAX(CASE WHEN country_code = 'US' THEN 1 ELSE 0 END) AS US_Sales_Rights
+FROM reporting_layer.view_book_sales_rights
+WHERE book_id in (select referrer_book FROM Grouped_Referrer_book)
+GROUP BY book_id)
+
+/* Combined final table */
+
+SELECT Grouped_Referrer_book.*, CASE WHEN US_Sales_Rights = 1 THEN 'YES' ELSE 'NO' END AS US_Sales_Rights_Text
+from Grouped_Referrer_book
+LEFT JOIN US_Sales_Rights_Table ON US_Sales_Rights_Table.book_id = Grouped_Referrer_book.referrer_book
+
