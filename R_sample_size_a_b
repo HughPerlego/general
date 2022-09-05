@@ -1,0 +1,69 @@
+setwd('/Users/hughwaters/Documents/Ad Hoc Data/Search/Sample')
+
+library(dplyr)
+library(ggplot2)
+
+First_Letter <- c('A')
+Sequence_Group <- rep(c('B', 'B', 'A', 'A'), 70000)
+
+Combined_Group_Allocation <- data.frame(Row_Num = seq(1, length(Sequence_Group) + 1, 1),
+                                        Allocated_Group = append(First_Letter, Sequence_Group))
+
+# Read Data In 
+
+A_B_Data <- read.csv('Sample_Book_Data.csv')
+
+# join to allocated group 
+
+A_B_Data <- merge.data.frame(A_B_Data, Combined_Group_Allocation, by.x = 'overall_row_num_fortnight', by.y = 'Row_Num', all.x = T)
+
+
+# determine fortnight cut off range 
+
+quantile(A_B_Data$success_searches_fortnight, c(0.5, 0.75, 0.9, 0.99, 0.995,0.996,0.997 ,0.998, 0.999))
+
+filter(A_B_Data, success_searches_fortnight >= 4.4) %>%
+  ggplot(., aes(success_searches_fortnight))+geom_histogram()
+
+Cut_Off_Data <- filter(A_B_Data, success_searches_fortnight >= 3)
+
+Allocated_Group_Summary <- group_by(Cut_Off_Data, Allocated_Group) %>% 
+                           summarise(books = n(),
+                                     highest = max(success_searches_fortnight),
+                                     low = min(success_searches_fortnight),
+                                     average = mean(success_searches_fortnight),
+                                     median = median(success_searches_fortnight),
+                                     total_search = sum(success_searches_fortnight),
+                                     variance = var(success_searches_fortnight),
+                                     standard_deviation = sd(success_searches_fortnight))
+
+ggplot(Cut_Off_Data, aes(success_searches_fortnight, fill = Allocated_Group, alpha = 0.5))+geom_density()+facet_wrap(~Allocated_Group)
+
+
+Cut_off_subject_groups <-  group_by(Cut_Off_Data, subject_name) %>% 
+  summarise(books = n(),
+            highest = max(success_searches_fortnight),
+            low = min(success_searches_fortnight),
+            average = mean(success_searches_fortnight),
+            median = median(success_searches_fortnight),
+            total_search = sum(success_searches_fortnight),
+            variance = var(success_searches_fortnight),
+            standard_deviation = sd(success_searches_fortnight))
+
+
+write.csv(Cut_Off_Data, 'A_B_Test_Data_Final.csv')
+
+# remove possible outliers 
+
+test_remove_20_above <- filter(Cut_Off_Data, success_searches_fortnight <= 20)
+
+test_remove_20_groups <-  group_by(test_remove_20_above, Allocated_Group) %>% 
+  summarise(books = n(),
+            highest = max(success_searches_fortnight),
+            low = min(success_searches_fortnight),
+            average = mean(success_searches_fortnight),
+            median = median(success_searches_fortnight),
+            total_search = sum(success_searches_fortnight),
+            variance = var(success_searches_fortnight),
+            standard_deviation = sd(success_searches_fortnight))
+
