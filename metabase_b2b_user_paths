@@ -1,0 +1,119 @@
+WITH B2B_users AS (
+SELECT analytics_reporting.user_registrations.user_id, registration_time, DATE_ADD('hour', 1, registration_time) AS First_Hour_Action
+FROM analytics_reporting.user_registrations 
+INNER JOIN analytics_reporting.partner_organisations ON analytics_reporting.partner_organisations.organisation_id = analytics_reporting.user_registrations.organisation_id
+LEFT JOIN analytics_reporting.user_group_codes ON analytics_reporting.user_group_codes.user_id = analytics_reporting.user_registrations.user_id 
+WHERE {{Organisation}}
+AND {{Client_Group}}),
+
+Events_First_Hour 
+AS (
+SELECT analytics_reporting.user_tracking_events.user_id, event_timestamp, event_name, current_url, REPLACE(current_url, 'https://www.perlego.com/', '') AS Stripped_URL, registration_time
+FROM analytics_reporting.user_tracking_events
+INNER JOIN B2B_users ON B2B_users.user_id = user_tracking_events.user_id
+WHERE event_timestamp <= First_Hour_Action),
+
+Broadly_Group_Event_Names 
+AS (
+
+SELECT *,  COUNT(*) OVER (PARTITION BY user_id, event_timestamp) AS row_count_user_time,
+
+           CASE WHEN event_name IN ('account creation', 'subscription creation attempted',
+                                   'plan selection', 'open settings', 'start trial button click', 'language selection',
+                                   'reactivation button click', 'discount applied', 'marketing consent change') THEN 'Account Info'
+
+                WHEN event_name IN ('question completed') THEN 'Onboarding Section'
+
+                WHEN event_name IN ('subscription cancellation', 'cancellation answer', 'retention strategy applied') THEN 'Subscription Cancel'
+
+                WHEN event_name IN ('blur reader', 'open book', 'focus reader', 'page load', 'chapter load',
+                                    'next page', 'read button click', 'book menu tab opening', 'find in book tab opening',
+                                    'chapter click from within book', 'open book menu', 'previous page', 'chapter navigation',
+                                    'retry download', 'open epub book menu', 'download book', 'download book started', 'open chapter tab',
+                                    'read online book clicked', 'open pdf beta modal', 'chapter navigation button click - hamburger menu',
+                                    'page loaded', 'chapter click from within toc menu', 'reader onblur','reader onfocus',
+                                    'next button click', 'chapter loaded', 'book opening', 'book closing') THEN 'Reading'
+
+                WHEN event_name IN ('book cover click', 'book card click', 'about book') THEN 'book cover click'
+
+                WHEN event_name IN ('book status added', 'book status removed', 'delete book', 'renew expired book',
+                                    'add to library', 'book favourited', 'reading list shared', 'reading list favourite removed') THEN 'Book Status / Library'
+
+                WHEN event_name IN ('open app','log in','log out','open app menu') THEN 'Login / Out'
+
+                WHEN event_name IN ('page view', 'open toc', 'open FAQ', 'contact us', 'open report issue') THEN 'Page View'
+
+                WHEN event_name IN ('highlight creation', 'copy text', 'bookmark creation', 'font size change',
+                                    'tab selection', 'reference tab opening', 'open highlights tab', 'bookmarks tab opening',
+                                    'book reference copied', 'highlight removal', 'change highlight colour', 'annotations tab clicked',
+                                    'open font menu', 'bookmark removal', 'highlight creation failure', 'eye saver mode change', 'font family change',
+                                    'annotation navigation', 'book shared', 'reading list card click', 'annotation creation',
+                                    'bookmark navigation', 'favourite removed', 'reading list favourite added', 'annotation removal',
+                                   'highlight created', 'bookmark created', 'change font size', 'change eye saver mode', 'create highlight') THEN 'Reading Feature'
+
+                WHEN event_name IN  ('book search', 'filter selection', 'topic card click', 'subtopic card click', 'publisher card click', 'search all results','search available books') THEN 'Search'
+
+                WHEN event_name IN ('workspace book added', 'workspace created', 'workspace book removed', 'workspace edited', 'workspace deleted', 'workspace shared', 'workspace book edited') THEN 'Workspace'
+
+                WHEN event_name = 'subscription creation' THEN 'subscription creation' ELSE 'Other' END AS grouped_event_name
+                 
+FROM Events_First_Hour),
+
+/* filter out diplicate  */
+Filter_Page_Views 
+AS (
+                    SELECT *
+                    FROM Broadly_Group_Event_Names
+                    WHERE (row_count_user_time = 1 or (row_count_user_time > 1 and event_name <> 'page view'))
+                    AND event_name <> 'close book' and event_name <> 'book closing'
+                    AND Stripped_URL NOT IN ('welcome/', 'confirmation', 'registration', 'not-found', 'welcome#', 'welcome')),
+            
+                    
+                    
+Change_URLs_Stats 
+AS (
+SELECT Filter_Page_Views.*,
+       CASE WHEN (stripped_url LIKE 'personalise?question%' or Stripped_URL LIKE 'confirmation?question%') and grouped_event_name <> 'Onboarding Question Answered' THEN 'Onboarding Section'
+            WHEN stripped_url LIKE 'home%' and event_name = 'page view' THEN 'HomePage'
+            WHEN stripped_url = 'license-redeemed' THEN 'license-redeemed'
+            WHEN Stripped_URL = 'settings' and event_name = 'page view' THEN 'Account Info'
+            WHEN Stripped_URL LIKE 'book%' and event_name = 'page view' THEN 'book cover click'
+            WHEN Stripped_URL LIKE 'search?query%' and event_name = 'page view' THEN 'Search'
+            WHEN Stripped_URL = 'cancellation' and event_name = 'page view' THEN 'Subscription Cancel'
+            WHEN event_name IN ('copy', 'highlights tab opening') THEN 'Reading Feature'
+            WHEN Stripped_URL LIKE '%ereader%' and event_name = 'page view' THEN 'Reading'
+            WHEN Stripped_URL = 'reading' and event_name = 'page view' THEN 'Reading'
+            WHEN Stripped_URL LIKE 'workspace%' and event_name = 'page view' THEN 'Workspace'
+            WHEN Stripped_URL IN ('want-to-read', 'my-library') and event_name = 'page view' THEN 'Book Status / Library'
+            WHEN (Stripped_URL LIKE 'browse%' or Stripped_URL = 'Discover' or Stripped_URL = 'discover') and event_name = 'page view' THEN 'Browse / Discover'
+            ELSE grouped_event_name END AS grouped_event_name_final
+        
+FROM Filter_Page_Views),
+
+/* group broad events to remove duplicates - when use is still in the same section - also remove page view on assumption that all the main events are captured by this point - may not be the case moving forward */
+Grouped_Ordered_Events AS (
+SELECT user_id, grouped_event_name_final, event_timestamp, MIN(registration_time) AS First_Registration_Time
+FROM Change_URLs_Stats
+WHERE grouped_event_name_final <> 'Page View'
+GROUP BY user_id, registration_time, grouped_event_name_final, event_timestamp
+ORDER BY user_id, event_timestamp),
+
+/* remove duplicate grouped events to see path more clearly  */
+Create_Case_filter as (
+SELECT *, CASE WHEN grouped_event_name_final = lag(grouped_event_name_final, 1) over (PARTITION by User_id order by event_timestamp rows unbounded preceding) then 0 else 1 end as keep_event 
+FROM Grouped_Ordered_Events),
+
+/* Broad User Paths - 1st Hour */
+User_Paths_Table AS (
+SELECT user_id, First_Registration_Time, array_join(array_agg(grouped_event_name_final ORDER BY event_timestamp),' > ') AS User_Path
+FROM Create_Case_filter
+WHERE keep_event = 1
+GROUP BY user_id, First_Registration_Time)
+
+
+SELECT User_Path, COUNT(*) AS Users 
+FROM User_Paths_Table
+GROUP BY User_Path
+ORDER BY Users DESC 
+
+
