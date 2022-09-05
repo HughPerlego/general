@@ -1,0 +1,95 @@
+# Algolia Score normalisation and grouping 
+
+setwd('/Users/hughwaters/Documents/Ad Hoc Data/Algolia - Grouped Scores')
+
+# libraries 
+
+library(dplyr)
+library(ggplot2)
+library(zoo)
+
+# Clean Import - All Time ------------------------------------------------------------
+
+Data <- read.csv('Input_Book_Activity_Score_All_Books_05092022.csv')
+
+Data <- mutate(Data, reading_minutes_normalize = round((reading_minutes - min(reading_minutes)) / (max(reading_minutes) - min(reading_minutes)) * 1000, 0),
+               unique_users_normalize = round((unique_users - min(unique_users)) / (max(unique_users) - min(unique_users)) * 1000, 0),
+               book_opened_normalize = round((book_opened - min(book_opened)) / (max(book_opened) - min(book_opened)) * 1000, 0),
+               google_page_views_normalize = round((book_views_via_google - min(book_views_via_google)) / (max(book_views_via_google) - min(book_views_via_google)) * 1000, 0))
+
+Data <- mutate(Data, 
+               avg_reading_mins_per_unique_user = round(reading_minutes / unique_users, 1),
+               avg_reading_mins_per_book_open = round(reading_minutes / book_opened, 1),
+               avg_book_open_per_unique_user = round(book_opened / unique_users, 1))
+
+Data$avg_reading_mins_per_unique_user <- na.fill(Data$avg_reading_mins_per_unique_user, 0)
+Data$avg_reading_mins_per_book_open <- na.fill(Data$avg_reading_mins_per_book_open, 0)
+Data$avg_book_open_per_unique_user <- na.fill(Data$avg_book_open_per_unique_user, 0)
+
+# reading mins- for each measure strip out books with no activity then assign groups by percentile rank - 
+# designed to provide reasonably similar groups although variation in group 8 is still extreme - no activity books in group 1   
+
+reading_min_group_calculation <- filter(Data, reading_minutes > 0) 
+
+reading_min_group_calculation$reading_minutes_grouped <- cut(reading_min_group_calculation$reading_minutes, 
+                                                             quantile(reading_min_group_calculation$reading_minutes, 
+                                                                      probs = c(0, 0.5, 0.75, 0.9, 0.95, 0.99, 0.9999 , 1)),
+                                                             labels = F, include.lowest = TRUE) + 1
+reading_min_group_calculation <- select(reading_min_group_calculation, book_id, reading_minutes_grouped)
+
+Data <- merge.data.frame(Data, reading_min_group_calculation, by.x = 'book_id', by.y = 'book_id', all.x = T)
+
+Data <- mutate(Data, reading_minutes_grouped = ifelse(reading_minutes == 0, 1, reading_minutes_grouped))
+
+# unique users 
+
+unique_users_group_calculation <- filter(Data, unique_users > 0) 
+unique_users_group_calculation$unique_users_grouped <- cut(unique_users_group_calculation$unique_users, 
+                                                             quantile(unique_users_group_calculation$unique_users,
+                                                                      probs = c(0, 0.5, 0.75, 0.9, 0.95, 0.99, 0.9999, 1)),
+                                                             labels = F, include.lowest = TRUE) + 1
+unique_users_group_calculation <- select(unique_users_group_calculation, book_id, unique_users_grouped)
+
+Data <- merge.data.frame(Data, unique_users_group_calculation, by.x = 'book_id', by.y = 'book_id', all.x = T)
+
+Data <- mutate(Data, unique_users_grouped = ifelse(unique_users == 0, 1, unique_users_grouped))
+
+# books opened 
+
+book_opened_group_calculation <- filter(Data, book_opened > 0) 
+book_opened_group_calculation$book_opened_grouped <- cut(book_opened_group_calculation$book_opened, 
+                                                           quantile(book_opened_group_calculation$book_opened,
+                                                                    probs = c(0, 0.5, 0.75, 0.9, 0.95, 0.99, 1)),
+                                                           labels = F, include.lowest = TRUE) + 1
+book_opened_group_calculation <- select(book_opened_group_calculation, book_id, book_opened_grouped)
+
+Data <- merge.data.frame(Data, book_opened_group_calculation, by.x = 'book_id', by.y = 'book_id', all.x = T)
+
+Data <- mutate(Data, book_opened_grouped = ifelse(book_opened == 0, 1, book_opened_grouped))
+
+# add average per group 
+
+Data <- group_by(Data, reading_minutes_grouped) %>% mutate(average_reading_minutes_per_group = mean(reading_minutes)) %>% ungroup()
+Data <- group_by(Data, unique_users_grouped) %>% mutate(average_unique_users_per_group = mean(unique_users)) %>% ungroup()
+Data <- group_by(Data, book_opened_grouped) %>% mutate(average_book_opened_grouped_per_group = mean(book_opened)) %>% ungroup()
+
+# sample records 
+
+Sampled_Data <- sample_n(Data, 10000)
+
+write.csv(Sampled_Data, 'Sampled_Data.csv')
+
+Sampled_Data <- select(Sampled_Data, book_id, reading_minutes, unique_users, book_opened, book_views_via_google,
+                       reading_minutes_normalize, unique_users_normalize, book_opened_normalize, avg_reading_mins_per_unique_user,
+                       avg_reading_mins_per_book_open, avg_book_open_per_unique_user, reading_minutes_grouped, unique_users_grouped,
+                       book_opened_grouped, average_reading_minutes_per_group, average_unique_users_per_group, average_book_opened_grouped_per_group)
+
+# Full export 
+
+Data <- select(Data, book_id, reading_minutes, unique_users, book_opened, book_views_via_google,
+                       reading_minutes_normalize, unique_users_normalize, book_opened_normalize, avg_reading_mins_per_unique_user,
+                       avg_reading_mins_per_book_open, avg_book_open_per_unique_user, reading_minutes_grouped, unique_users_grouped,
+                       book_opened_grouped, average_reading_minutes_per_group, average_unique_users_per_group, average_book_opened_grouped_per_group)
+
+write.csv(Data, 'Algolia_Scores_All_Time_05092022.csv')
+
