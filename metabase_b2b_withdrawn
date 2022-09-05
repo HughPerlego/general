@@ -1,0 +1,68 @@
+/* Mark books to be withdrawn */
+
+WITH Withdrawl_Books AS (
+SELECT id as book_id, withdrawal_date, withdrawal_type
+FROM prodgluegoldbuckets3database.book_meta 
+WHERE withdrawal_date >= date_add('week', -2, current_date) AND withdrawal_date <= DATE_ADD('month', 6, current_date)),
+
+/* B2B user activity for withdrawn books   */
+
+B2B_Reading_Activity AS (
+SELECT Withdrawl_Books.book_id,
+       book_title,
+       subject_name, 
+       publisher_name,
+       content_language,
+       primary_topic,
+       withdrawal_date, 
+       withdrawal_type, 
+       organisation_name,
+       COUNT(*) AS BooksOpened_B2B, 
+       COUNT(DISTINCT(analytics_reporting.reading_activity_daily.user_id)) AS Unique_Users_B2B,
+       SUM(reading_duration_seconds) AS Seconds_Read_B2B
+FROM Withdrawl_Books
+LEFT JOIN analytics_reporting.reading_activity_daily ON analytics_reporting.reading_activity_daily.book_id = Withdrawl_Books.book_id 
+INNER JOIN analytics_reporting.user_registrations ON analytics_reporting.user_registrations.user_id = analytics_reporting.reading_activity_daily.user_id 
+WHERE organisation_name <> ''
+AND reading_duration_seconds > 0
+GROUP BY Withdrawl_Books.book_id,
+         book_title,
+         subject_name, 
+         publisher_name,
+         content_language,
+         primary_topic,
+         withdrawal_date, 
+         withdrawal_type,
+         organisation_name),
+
+/* find total reading activity for b2b organisations  */
+Total_B2B_Reading AS (
+SELECT organisation_name, 
+       COUNT(*) AS All_Books_Opened, 
+       COUNT(DISTINCT(analytics_reporting.reading_activity_daily.user_id)) AS All_Unique_Users,
+       SUM(reading_duration_seconds) AS All_Seconds_Read
+FROM analytics_reporting.reading_activity_daily
+INNER JOIN analytics_reporting.user_registrations ON analytics_reporting.user_registrations.user_id = analytics_reporting.reading_activity_daily.user_id          
+WHERE organisation_name <> ''
+AND reading_duration_seconds > 0
+AND analytics_reporting.reading_activity_daily.book_id IN (SELECT book_id FROM analytics_reporting.books WHERE currently_activated = 'Y')
+GROUP BY organisation_name),
+
+        Results_Table AS (
+SELECT B2B_Reading_Activity.*, 
+       All_Books_Opened, 
+       All_Unique_Users, 
+       All_Seconds_Read,
+       100.0*(BooksOpened_B2B) / All_Books_Opened AS Percent_Of_Organisation_Books,
+       100.0*(Seconds_Read_B2B) / All_Seconds_Read AS Percent_Of_Organisation_Minutes
+FROM B2B_Reading_Activity
+LEFT JOIN Total_B2B_Reading ON Total_B2B_Reading.organisation_name = B2B_Reading_Activity.organisation_name
+ORDER BY Percent_Of_Organisation_Books DESC)
+
+SELECT organisation_name, 
+       COUNT(*) AS Books_To_Be_Or_Recently_Withdrawn,
+       SUM(Percent_Of_Organisation_Books) AS Percent_of_Books 
+FROM Results_Table
+GROUP BY organisation_name
+HAVING SUM(Percent_Of_Organisation_Books) > 0.2
+ORDER BY Percent_of_Books DESC 
