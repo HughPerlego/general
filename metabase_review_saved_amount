@@ -1,0 +1,33 @@
+/* Create Week Calendar Table - Filter to start 2019 and current date */
+WITH MonthTable AS
+    (SELECT DATEDIFF(Month, '2017-01-01', calendar_date) AS MonthNumber,
+       MIN(calendar_date) AS MonthStartDate,
+       MAX(calendar_date) AS MonthEndDate
+FROM reporting_layer.ref_calendar_day
+WHERE calendar_date >= '2017-01-01' and calendar_date <= getdate()
+GROUP BY DATEDIFF(Month, '2017-01-01', calendar_date)),
+
+     /* Paid Subscribers -or Active B2B subscribers */
+SubscriberCount AS (
+SELECT MonthTable.*, s.user_id, s.payment_channel, s.start_timestamp, end_timestamp
+from reporting.subscriptions s
+join MonthTable on
+    (s.start_timestamp between MonthTable.MonthStartDate and MonthTable.MonthEndDate)
+or (s.start_timestamp < MonthTable.MonthStartDate and s.end_timestamp > MonthStartDate)
+WHERE subscription_type = 'subscribed'
+and (MonthStartDate = '2020-12-01' or MonthStartDate = '2021-12-01')
+AND (s.payment_channel = 'indirect' or s.paid_months > 0)
+AND user_id IN (SELECT user_id from reporting.user_registrations where internal_user = 'N'))
+
+/* 2021 reading stats- saved - mark 10% for book to count - avgeage dlp of £32.5 - average calue by total sunbscriber total   */
+
+select 
+count(*) as records, sum(time_spent_minutes) as total_time,
+sum(time_spent_minutes) as total_time_mins, count(distinct(SubscriberCount.user_id)) as unique_users,
+round(1.0*(count(*)) / count(distinct(SubscriberCount.user_id)), 1) as average_books_per_user,
+round(sum(1.0*(time_spent_minutes)) / count(distinct(SubscriberCount.user_id)), 1) as avg_mins_reading_per_user
+from SubscriberCount
+left join reporting.reading_activity_monthly on reporting.reading_activity_monthly.user_id = SubscriberCount.user_id
+where period_start >= '2020-12-01' and period_start < '2021-12-01'
+and MonthStartDate = '2021-12-01'
+and percentage_read > 10
