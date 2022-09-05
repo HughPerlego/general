@@ -1,0 +1,89 @@
+install.packages('vtree')
+b <- FakeData
+
+vtree(FakeData,"Sex")
+
+library(dplyr)
+library(vtree)
+
+# Test 
+
+setwd("/Users/hughwaters/Documents/Ad Hoc Data/Full user path")
+
+All_user_path_data <- read.csv('2022_user_data.csv')
+
+All_user_path_data <- filter(All_user_path_data, user_region != '')
+
+All_user_path_data$utm_medium <- as.character(All_user_path_data$utm_medium)
+
+All_user_path_data <- mutate(All_user_path_data, utm_medium = ifelse(utm_medium == 'cpc' | utm_medium == 'organic' , utm_medium)),
+All_user_path_data <- mutate(All_user_path_data, User_Status = ifelse(User_Status == 'Book Page > Access Another Book > Signup Via Homepage' | User_Status == 'Homepage > Book > Signup Via Homepage', 'Other', User_Status))
+All_user_path_data <- mutate(All_user_path_data, Pre_Signup_Activity = User_Status)
+
+All_user_path_data_non_row <- filter(All_user_path_data, user_region != 'ROW')
+
+vtree(All_user_path_data_non_row,vars = c('user_region', 'utm_medium', 'Pre_Signup_Activity'), sameline= TRUE, 
+      follow=list(Pre_Signup_Activity="No Books Viewed"), title = 'NORTHAM D2C Trial Users 2022')
+
+
+
+
+
+
+
+                 
+All_user_path_data_usa <- filter(All_user_path_data, user_region == 'NORTHAM')
+All_user_path_data_usa <- mutate(All_user_path_data_usa, Result = ifelse(Subscribed == 1, 'Subscribed', 'Trial Only'))
+All_user_path_data_usa <- mutate(All_user_path_data_usa, User_Status = ifelse(User_Status == 'Book Page > Access Another Book > Signup Via Homepage' | User_Status == 'Homepage > Book > Signup Via Homepage', 'Other', User_Status))
+All_user_path_data_usa <- mutate(All_user_path_data_usa, Pre_Signup_Activity = User_Status)
+All_user_path_data_usa <- filter(All_user_path_data_usa, Book_Search_D1 != 'Other')
+
+
+
+
+
+
+
+
+vtree(All_user_path_data_usa,vars = c('utm_medium', 'Pre_Signup_Activity', 'Result'), sameline= TRUE,prunesmaller=3,
+      title = 'NORTHAM D2C Trial Users 2022')
+
+vtree(All_user_path_data_usa,vars = c('utm_medium', 'Pre_Signup_Activity', 'Book_Search_D1', 'Result'), sameline= TRUE, 
+      follow=list(Pre_Signup_Activity="No Books Viewed"), title = 'NORTHAM D2C Trial Users 2022')
+
+
+
+
+All_cpc <- filter(All_user_path_data, utm_medium == 'cpc')
+All_cpc <- mutate(All_cpc, Result = ifelse(Subscribed == 1, 'Subscribed', 'Trial Only'))
+All_cpc <- mutate(All_cpc, User_Status = ifelse(User_Status == 'Book Page > Access Another Book > Signup Via Homepage' | User_Status == 'Homepage > Book > Signup Via Homepage', 'Other', User_Status))
+All_cpc <- mutate(All_cpc, Pre_Signup_Activity = User_Status)
+All_cpc <- filter(All_cpc, Book_Search_D1 != 'Other')
+All_cpc <- filter(All_cpc, user_region != 'ROW')
+
+
+
+vtree(All_cpc,vars = c("user_region", 'Pre_Signup_Activity', 'Result'), sameline= TRUE,prunesmaller=3)
+
+vtree(All_cpc,vars = c("user_region", 'Pre_Signup_Activity', 'Book_Search_D1', 'Result'), sameline= TRUE, 
+      follow=list(Pre_Signup_Activity="No Books Viewed"), title = 'All CPC Trial Users 2022')
+
+# ttp test 
+
+vtree(All_cpc,vars = c("user_region", 'Pre_Signup_Activity', 'Book_Search_D1', 'Result'), sameline= FALSE, 
+      follow=list(Pre_Signup_Activity="No Books Viewed"), title = 'All CPC Trial Users 2022',
+      summary = "Subscribed\ Subscribers \n%sum%")
+
+
+
+vtree(All_cpc,vars = c("user_region", 'Pre_Signup_Activity', 'Book_Search_D1'), sameline= FALSE, 
+      follow=list(Pre_Signup_Activity="No Books Viewed"), title = 'All CPC Trial Users 2022')
+
+
+
+
+
+
+
+
+
