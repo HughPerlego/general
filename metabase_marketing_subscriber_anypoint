@@ -1,0 +1,8 @@
+SELECT analytics_reporting.subscriptions.*, email 
+FROM analytics_reporting.subscriptions 
+LEFT JOIN prodgluegoldbuckets3database.users ON prodgluegoldbuckets3database.users.id = analytics_reporting.subscriptions.user_id
+WHERE payment_channel = 'direct'
+AND subscription_type = 'subscribed'
+AND (start_timestamp >= CAST('2021-08-16' as date) or end_timestamp >= cast('2021-08-16' as date))
+ORDER BY start_timestamp ASC 
+
