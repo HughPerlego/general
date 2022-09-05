@@ -1,0 +1,27 @@
+/* Notes written  */
+
+ /* Create Week Calendar Table - Filter to start 2019 and current date */
+WITH MonthTable AS
+    (SELECT DATEDIFF(Month, '2017-01-01', calendar_date) AS MonthNumber,
+       MIN(calendar_date) AS MonthStartDate,
+       MAX(calendar_date) AS MonthEndDate
+FROM reporting_layer.ref_calendar_day
+WHERE calendar_date >= '2017-01-01' and calendar_date <= getdate()
+GROUP BY DATEDIFF(Month, '2017-01-01', calendar_date)),
+
+     /* Paid Subscribers -or Active B2B subscribers */
+SubscriberCount AS (
+SELECT MonthTable.*, s.user_id, s.payment_channel, s.start_timestamp, end_timestamp
+from reporting.subscriptions s
+join MonthTable on
+    (s.start_timestamp between MonthTable.MonthStartDate and MonthTable.MonthEndDate)
+or (s.start_timestamp < MonthTable.MonthStartDate and s.end_timestamp > MonthStartDate)
+WHERE subscription_type = 'subscribed'
+and (MonthStartDate = '2020-12-01' or MonthStartDate = '2021-12-01')
+AND (s.payment_channel = 'indirect' or s.paid_months > 0)
+AND user_id IN (SELECT user_id from reporting.user_registrations where internal_user = 'N'))
+
+select count(*) as annotations_count
+from reporting.book_annotations
+where created_timestamp >= '2020-12-01' and created_timestamp < '2021-12-01'
+and user_id in (select user_id from SubscriberCount where MonthStartDate = '2021-12-01')
