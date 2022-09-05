@@ -1,0 +1,21 @@
+WITH Book_List AS (
+select book_id, book_title, subject_name, analytics_reporting.books.topic_name_1 as Main_Topic, publisher_name,
+       count(*) as trials_created, 
+       ROW_NUMBER() OVER (partition by subject_name order by count(*) DESC) AS Subject_Popularity_Book_Rank,
+       ROW_NUMBER() OVER (partition by subject_name, topic_name_1 order by count(*) DESC) AS Subject_Main_Topic_Popularity_Book_Rank,
+       ROW_NUMBER() OVER (partition by topic_name_1 order by count(*) DESC) AS Main_Topic_Popularity_Book_Rank
+from analytics_reporting.user_registrations
+inner join analytics_reporting.books ON analytics_reporting.books.book_id = user_registrations.referrer_book
+where converted_trial = 'Y'
+and payment_channel_crude = 'direct'
+and referrer_book is not null 
+and {{Topic}}
+AND {{topic_2}}
+and currently_activated = 'Y'
+group by book_id, book_title, subject_name, topic_name_1, publisher_name
+order by subject_name, Main_Topic, trials_created desc)
+
+select book_title, book_id, Main_Topic_Popularity_Book_Rank, trials_created
+from Book_List
+where Main_Topic_Popularity_Book_Rank <= 20
+order by Main_Topic_Popularity_Book_Rank
