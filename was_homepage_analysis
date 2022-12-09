@@ -1,0 +1,358 @@
+
+INSERT INTO athena_analytics.hw_hompeage_analysis_combined_table (
+user_id,
+view_date,
+Homepage_Views,
+Discover_View,
+Reffer_A_Friend_View,
+Reading_View,
+Want_To_Read_View,
+Completed_Read_View,
+Notebook_View,
+Workspace_Viewed,
+Workspace_Created,
+Homepage_Book_Searches,
+Homepage_Book_Searches_capped,
+AccountButton_Settings_View,
+AccountButton_Profile_View,
+Reading_Carousel_Book_Click,
+Reading_Carousel_Book_Open,
+Reading_Carousel_Book_Status_Update,
+Reading_Carousel_Book_Workspace_Added,
+Interests_Curated_Carousel_Book_Click,
+Interests_Curated_Carousel_Book_Opened,
+Interests_Curated_Carousel_Book_Status_Update,
+Interests_Curated_Carousel_Book_Workspace_Added,
+Reading_Section_Continue_Reading_book_cover,
+Reading_Section_Continue_Reading_book_open,
+Want_Section_Continue_Reading_book_cover,
+Want_Section_Continue_Reading_book_open,
+Want_Section_First_Reading_book_cover,
+Want_Section_First_Reading_book_open,
+Completed_Section_Continue_Reading_book_cover,
+Completed_Section_Continue_Reading_book_open,
+Completed_Section_First_Reading_book_cover,
+Completed_Section_First_Reading_book_open,
+Reading_List_Clicks,
+Book_Spotlight_Clicks,
+payment_channel_crude,
+user_persona , 
+acquisition_country,
+utm_medium, 
+utm_source, 
+study_level, 
+referrer_book, 
+converted_subscribed , 
+currently_subscribed,
+D1_Books_Opened,
+D1_Unique_Books_Opened,
+D1_Secs_Read,
+W1_Books_Opened,
+W1_Unique_Books_Opened,
+W1_Secs_Read)
+
+/* Main Homepage view table - to use as base table - all results limited to website */
+
+WITH Main_Homepage_Table AS (
+SELECT user_id, CAST(record_date as date) as view_date, COUNT(*) AS Homepage_Views 
+FROM prodgluegoldbuckets3database.event_tracking 
+WHERE user_id IS NOT NULL 
+AND record_date >= CAST('2022-06-01' AS DATE)
+AND event_name = 'page view'
+AND current_url = 'https://www.perlego.com/home'
+AND environment_name = 'Web Application'
+GROUP BY user_id, CAST(record_date as date)),
+
+/* create table getting views for each user and day for the sidebar -
+create case statements to determine how many times each day the buttons are clicked - 
+very high reading & want to read count which may be due to it accidently counting ereader session as a reading view - rather than the homepage- applying non referrer_url to try and remove these*/
+
+Sidebar_Page_Views AS (
+SELECT user_id, CAST(record_date as date) as view_date, 
+       
+       SUM(CASE WHEN current_url = 'https://www.perlego.com/discover' THEN 1 ELSE 0 END) AS Discover_View,
+       
+        SUM(CASE WHEN current_url = 'https://www.perlego.com/refer-a-friend' THEN 1 ELSE 0 END) AS Reffer_A_Friend_View,
+       
+         SUM(CASE WHEN current_url = 'https://www.perlego.com/reading' AND referrer_url <> 'https://ereader.perlego.com/' THEN 1 ELSE 0 END) AS Reading_View,
+         
+         SUM(CASE WHEN current_url = 'https://www.perlego.com/want-to-read' AND referrer_url <> 'https://ereader.perlego.com/' THEN 1 ELSE 0 END) AS Want_To_Read_View,
+    
+        SUM(CASE WHEN current_url = 'https://www.perlego.com/completed' THEN 1 ELSE 0 END) AS Completed_Read_View,
+      
+       SUM(CASE WHEN current_url = 'https://www.perlego.com/notebook' THEN 1 ELSE 0 END) AS Notebook_View
+FROM event_tracking 
+WHERE user_id IS NOT NULL 
+AND event_name = 'page view'
+AND record_date >= CAST('2022-06-01' AS DATE)
+AND current_url IN ('https://www.perlego.com/discover', 'https://www.perlego.com/refer-a-friend',
+                    'https://www.perlego.com/reading', 'https://www.perlego.com/want-to-read',
+                    'https://www.perlego.com/completed', 'https://www.perlego.com/notebook')
+AND environment_name = 'Web Application'
+GROUP BY user_id, CAST(record_date as date)),
+
+/* Workspace views - issue of duplicate page views for workspace - so add in additional page title conditions as seems to align with event sequence - but this may need to be reviewed at a later date  */
+
+Workspace_User_Data AS (
+SELECT user_id, CAST(record_date as date) as view_date, 
+       
+       SUM(CASE WHEN event_name = 'page view' AND current_url 
+       LIKE 'https://www.perlego.com/workspace%' THEN 1 ELSE 0 END) AS Workspace_Viewed,
+       
+         SUM(CASE WHEN event_name = 'workspace created' THEN 1 ELSE 0 END) AS Workspace_Created
+       
+FROM event_tracking 
+WHERE user_id IS NOT NULL 
+AND record_date >= CAST('2022-06-01' AS DATE)
+AND ((event_name = 'page view' AND current_url LIKE 'https://www.perlego.com/workspace%' AND page_title = 'Home | Perlego')
+OR (event_name = 'workspace created'))
+AND environment_name = 'Web Application'
+GROUP BY user_id, CAST(record_date as date)),
+
+/* Book Search - location marked as home - due to 2 second firing issue - will have to group terms together and mark as one search - otherwise count will be too high */
+Book_Search_Data AS (
+SELECT user_id, 
+       record_date, 
+       json_extract_scalar(event_properties, '$.searchTerm') as searchTerm,
+       LAG(json_extract_scalar(event_properties, '$.searchTerm'), 1) OVER (PARTITION BY user_id ORDER BY record_date) AS Previous_Search_term,
+       LAG(record_date, 1) OVER (PARTITION BY user_id ORDER BY record_date) AS Previous_search_date
+FROM event_tracking 
+WHERE user_id IS NOT NULL 
+AND record_date >= CAST('2022-06-01' AS DATE)
+AND event_name = 'book search'
+AND environment_name = 'Web Application'
+AND CAST(JSON_EXTRACT(event_properties, '$.location') as varchar) = 'home'
+ORDER BY user_id, record_date),
+
+/* add in fields comparing string and time difference to most recent search from that user  */
+Book_Search_Data_lag_fields as (
+SELECT Book_Search_Data.*, levenshtein_distance(searchTerm, Previous_Search_term) AS Leveshtein_Diff_Search_terms,
+                           date_diff('second', Previous_search_date, record_date) as seconds_after_previous_search,
+                           length(Previous_Search_term) as previous_search_term_character_length,
+                           CASE WHEN SUBSTR(searchTerm , 1, length(Previous_Search_term)) =
+                           Previous_Search_term THEN 1 ELSE 0 END AS Previous_Search_Subset
+FROM Book_Search_Data),
+
+/* Mark filter conditions to group results by, marking as part of the same search if 
+1) Previous_Search_Subset = 1 
+2) first search record e.g. leveshtein distance is null 
+3) Previous Search subset = 0 and leveshtein difference <= 3 - as it looks like in these cases a few characters have changed, but the substance of the search term is the same*/
+
+Mark_New_Search AS (
+SELECT *, 
+CASE WHEN Leveshtein_Diff_Search_terms IS NOT NULL and Previous_Search_Subset = 0 and Leveshtein_Diff_Search_terms >= 3 THEN 1 ELSE 0 END AS New_Search_Start,
+ CASE WHEN lead(Leveshtein_Diff_Search_terms, 1) over (partition by user_id order by record_date) IS NOT NULL AND
+     lead(Previous_Search_Subset, 1) over (partition by user_id order by record_date) = 0 
+     AND 
+     lead(Leveshtein_Diff_Search_terms, 1) over (partition by user_id order by record_date) >= 3 THEN 1 ELSE 0 END AS End_Of_Current_Search
+FROM Book_Search_Data_lag_fields),
+
+/* group by user and date with filter conditions to remove clear duplicates caused by 2 second firing event */
+Grouped_Book_Searches AS (
+SELECT user_id, 
+       CAST(record_date as date) as view_date,
+       COUNT(*) AS Homepage_Book_Searches
+FROM Mark_New_Search
+WHERE New_Search_Start = 1 or (End_Of_Current_Search = 1 and Previous_Search_term <> searchTerm)
+GROUP BY user_id, 
+         CAST(record_date as date)),
+
+/* account settings options - don't seem to have evetn for clicking button - only for profile centre and settings */
+
+Account_Button_Page_Views AS (
+SELECT user_id, CAST(record_date as date) as view_date, 
+       
+       SUM(CASE WHEN current_url = 'https://www.perlego.com/settings' THEN 1 ELSE 0 END) AS AccountButton_Settings_View,
+       SUM(CASE WHEN page_title = 'Profile | Perlego' THEN 1 ELSE 0 END) AS AccountButton_Profile_View
+       
+FROM event_tracking 
+WHERE user_id IS NOT NULL 
+AND event_name = 'page view'
+AND record_date >= CAST('2022-06-01' AS DATE)
+AND (current_url = 'https://www.perlego.com/settings' OR page_title = 'Profile | Perlego')
+AND environment_name = 'Web Application'
+GROUP BY user_id, CAST(record_date as date)),
+
+/* combine non carousel sections together - join by user id and year to base homepage table - as at least one visit to homepage needs to have been made to record events  */
+
+Combined_Non_Book_Open_Sections AS (
+SELECT Main_Homepage_Table.*, Discover_View, Reffer_A_Friend_View,
+       Reading_View, Want_To_Read_View, Completed_Read_View, Notebook_View,
+       Workspace_Viewed, Workspace_Created, Homepage_Book_Searches,
+       CASE WHEN homepage_book_searches > homepage_views then homepage_views ELSE homepage_book_searches END AS Homepage_Book_Searches_capped,
+       AccountButton_Settings_View, AccountButton_Profile_View
+FROM Main_Homepage_Table
+LEFT JOIN Sidebar_Page_Views ON (Sidebar_Page_Views.user_id = Main_Homepage_Table.user_id AND 
+                                 Sidebar_Page_Views.view_date = Main_Homepage_Table.view_date)
+LEFT JOIN Workspace_User_Data ON (Workspace_User_Data.user_id = Main_Homepage_Table.user_id AND 
+                                 Workspace_User_Data.view_date = Main_Homepage_Table.view_date)
+LEFT JOIN Grouped_Book_Searches ON (Grouped_Book_Searches.user_id = Main_Homepage_Table.user_id AND 
+                                 Grouped_Book_Searches.view_date = Main_Homepage_Table.view_date)
+LEFT JOIN Account_Button_Page_Views ON (Account_Button_Page_Views.user_id = Main_Homepage_Table.user_id AND                                                                                     Account_Button_Page_Views.view_date = Main_Homepage_Table.view_date)),
+
+/* find first book open times - used to determine which carousel book is opened from 
+- was also going to use first status added to reading carousel from the book status event, but there seemed to be a few issues so it has been left for now*/
+
+First_Book_Time AS (
+SELECT user_id, book_id, MIN(record_date) AS first_time, 'Book_Read' as status
+FROM prod_gold_bucket_database.raw_read_records 
+WHERE user_id IN (SELECT user_id FROM Main_Homepage_Table)
+AND environment = 'web'
+GROUP BY user_id, book_id),
+
+/* combine two ways to add book to reading carousel to find the find time - use this table in the main table join */
+
+Book_Interaction_Relevant_Locations AS (
+SELECT user_id, record_date, event_name, 
+       CASE WHEN event_name = 'book status added' THEN CAST(JSON_EXTRACT(event_properties, '$.bookID') as int)
+            ELSE CAST(JSON_EXTRACT(event_properties, '$.bookId') as int) END AS extracted_book_id,
+       CAST(JSON_EXTRACT(event_properties, '$.location') as varchar) AS extracted_location
+FROM prodgluegoldbuckets3database.event_tracking 
+WHERE event_name in ('book cover click', 'read button click', 'book status added', 'workspace book added')
+AND user_id in (SELECT user_id FROM Main_Homepage_Table)
+AND record_date >= CAST('2022-06-01' AS date)
+AND CAST(JSON_EXTRACT(event_properties, '$.location') as varchar) IN ('home', 'reading', 'want to read', 'completed')),
+
+/* join first time to interation table */
+
+Carousel_And_Reading_Section_Info AS (
+SELECT Book_Interaction_Relevant_Locations.user_id, CAST(record_date as date) as view_date,
+       
+       SUM(CASE WHEN extracted_location = 'home' AND event_name = 'book cover click' AND record_date >= first_time THEN 1 ELSE 0 END) AS Reading_Carousel_Book_Click,
+       SUM(CASE WHEN extracted_location = 'home' AND event_name = 'read button click' AND (record_date >= first_time OR first_time IS NULL) THEN 1 ELSE 0 END) AS Reading_Carousel_Book_Open,
+       SUM(CASE WHEN extracted_location = 'home' AND event_name = 'book status added' AND record_date >= first_time THEN 1 ELSE 0 END) AS Reading_Carousel_Book_Status_Update,
+       SUM(CASE WHEN extracted_location = 'home' AND event_name = 'workspace book added' AND (record_date >= first_time OR first_time IS NULL) THEN 1 ELSE 0 END) AS Reading_Carousel_Workspace_Added,
+       
+     SUM(CASE WHEN extracted_location = 'home' AND event_name = 'book cover click' AND (record_date <= first_time OR first_time IS NULL) THEN 1 ELSE 0 END) AS Interests_Curated_Carousel_Book_Click,
+      SUM(CASE WHEN extracted_location = 'home' AND event_name = 'read button click' AND (record_date <= first_time OR first_time IS NULL) THEN 1 ELSE 0 END) AS Interests_Curated_Carousel_Book_Opened,
+      SUM(CASE WHEN extracted_location = 'home' AND event_name = 'book status added' AND (record_date <= first_time OR first_time IS NULL) THEN 1 ELSE 0 END) AS Interests_Curated_Carousel_Book_Status_Update,
+      SUM(CASE WHEN extracted_location = 'home' AND event_name = 'workspace book added' AND (record_date <= first_time OR first_time IS NULL) THEN 1 ELSE 0 END) AS Interests_Curated_Carousel_Book_Workspace_Added, 
+       
+       SUM(CASE WHEN extracted_location = 'reading' AND record_date >= first_time AND event_name = 'book cover click' THEN 1 ELSE 0 END) AS Reading_Section_Continue_Reading_book_cover,
+       SUM(CASE WHEN extracted_location = 'reading' AND record_date >= first_time AND event_name = 'read button click' THEN 1 ELSE 0 END) AS Reading_Section_Continue_Reading_book_open,
+      
+      SUM(CASE WHEN extracted_location = 'reading' AND record_date <= first_time AND event_name = 'book cover click' THEN 1 ELSE 0 END) AS Reading_Section_First_Reading_book_cover,
+      SUM(CASE WHEN extracted_location = 'reading' AND record_date <= first_time AND event_name = 'read button click' THEN 1 ELSE 0 END) AS Reading_Section_First_Reading_book_open,
+     
+       SUM(CASE WHEN extracted_location = 'want to read' AND record_date >= first_time AND event_name = 'book cover click' THEN 1 ELSE 0 END) AS Want_Section_Continue_Reading_book_cover,
+        SUM(CASE WHEN extracted_location = 'want to read' AND record_date >= first_time AND event_name = 'read button click' THEN 1 ELSE 0 END) AS Want_Section_Continue_Reading_book_open,
+       
+      SUM(CASE WHEN extracted_location = 'want to read' AND record_date <= first_time AND event_name = 'book cover click' THEN 1 ELSE 0 END) AS Want_Section_First_Reading_book_cover,
+      SUM(CASE WHEN extracted_location = 'want to read' AND record_date <= first_time AND event_name = 'read button click' THEN 1 ELSE 0 END) AS Want_Section_First_Reading_book_open, 
+       
+      SUM(CASE WHEN extracted_location = 'completed' AND record_date >= first_time AND event_name = 'book cover click' THEN 1 ELSE 0 END) AS Completed_Section_Continue_Reading_book_cover,
+      SUM(CASE WHEN extracted_location = 'completed' AND record_date >= first_time AND event_name = 'read button click' THEN 1 ELSE 0 END) AS Completed_Section_Continue_Reading_book_open,
+      
+      SUM(CASE WHEN extracted_location = 'completed' AND record_date <= first_time AND event_name = 'book cover click' THEN 1 ELSE 0 END) AS Completed_Section_First_Reading_book_cover,
+       SUM(CASE WHEN extracted_location = 'completed' AND record_date <= first_time AND event_name = 'read button click' THEN 1 ELSE 0 END) AS Completed_Section_First_Reading_book_open
+FROM Book_Interaction_Relevant_Locations
+LEFT JOIN First_Book_Time ON (First_Book_Time.user_id = Book_Interaction_Relevant_Locations.user_id AND
+                              First_Book_Time.book_id = Book_Interaction_Relevant_Locations.extracted_book_id)
+GROUP BY Book_Interaction_Relevant_Locations.user_id, CAST(record_date as date)),
+
+/* include reading list card click events - marked from the homepage */
+
+Reading_List_Views AS (
+SELECT user_id, CAST(record_date as date) as view_date, COUNT(*) AS Reading_List_Clicks
+FROM event_tracking 
+WHERE user_id IN (SELECT user_id FROM Main_Homepage_Table)
+AND record_date >= CAST('2022-06-01' AS date)
+AND event_name = 'reading list card click'
+AND environment_name = 'Web Application'
+AND CAST(JSON_EXTRACT(event_properties, '$.location') as varchar) = 'home'
+GROUP BY user_id, CAST(record_date as date)),
+
+/* book spotlight event interaction - highlights signed up book post 29th sep */
+
+Book_Spotlight_Views AS (
+SELECT user_id, CAST(record_date as date) as view_date, COUNT(*) AS Book_Spotlight_Clicks
+FROM event_tracking 
+WHERE event_name = 'book spotlight reading click'
+AND CAST(json_extract(event_properties, '$.location') as varchar) = 'home'
+AND user_id IN (SELECT user_id FROM Main_Homepage_Table)
+AND record_date >= CAST('2022-06-01' AS date)
+GROUP BY user_id, CAST(record_date as date)),
+
+/* carousel & readling list card clicks data added to previous table  */
+
+All_Homepage_Events AS (
+SELECT Combined_Non_Book_Open_Sections.*, 
+       Reading_Carousel_Book_Click,
+       Reading_Carousel_Book_Open,
+       Reading_Carousel_Book_Status_Update,
+       Reading_Carousel_Workspace_Added,
+       Interests_Curated_Carousel_Book_Click,
+       Interests_Curated_Carousel_Book_Opened,
+       Interests_Curated_Carousel_Book_Status_Update,
+       Interests_Curated_Carousel_Book_Workspace_Added,
+       Reading_Section_Continue_Reading_book_cover,
+       Reading_Section_Continue_Reading_book_open,
+       Want_Section_Continue_Reading_book_cover,
+       Want_Section_Continue_Reading_book_open,
+       Want_Section_First_Reading_book_cover,
+       Want_Section_First_Reading_book_open,
+       Completed_Section_Continue_Reading_book_cover,
+       Completed_Section_Continue_Reading_book_open,
+       Completed_Section_First_Reading_book_cover,
+       Completed_Section_First_Reading_book_open,
+       Reading_List_Clicks,
+       Book_Spotlight_Clicks
+       
+FROM Combined_Non_Book_Open_Sections
+LEFT JOIN Carousel_And_Reading_Section_Info ON  (Carousel_And_Reading_Section_Info.user_id = Combined_Non_Book_Open_Sections.user_id AND 
+                                                 Carousel_And_Reading_Section_Info.view_date = Combined_Non_Book_Open_Sections.view_date)
+                                 
+LEFT JOIN Reading_List_Views ON (Reading_List_Views.user_id = Combined_Non_Book_Open_Sections.user_id AND 
+                                 Reading_List_Views.view_date = Combined_Non_Book_Open_Sections.view_date)
+
+LEFT JOIN Book_Spotlight_Views ON (Book_Spotlight_Views.user_id = Combined_Non_Book_Open_Sections.user_id AND 
+                                 Book_Spotlight_Views.view_date = Combined_Non_Book_Open_Sections.view_date)),
+                                        
+/* attach user related information */
+
+User_Info_Added AS (
+SELECT All_Homepage_Events.*, 
+       CAST(payment_channel_crude as varchar(300)),
+       CAST(user_persona as varchar(300)), 
+       CAST(acquisition_country as varchar(300)),
+       CAST(utm_medium as varchar(300)), 
+       CAST(utm_source as varchar(300)), 
+       CAST(study_level as varchar(300)), 
+       referrer_book, 
+       CAST(converted_subscribed as varchar(300)), 
+       CAST(currently_subscribed as varchar(300))
+FROM All_Homepage_Events
+LEFT JOIN analytics_reporting.user_registrations ON All_Homepage_Events.user_id = analytics_reporting.user_registrations.user_id),
+
+/* create table showing user activity on D1 & W1 - as general engangment score */
+
+Grouped_User_Activity AS (
+SELECT analytics_reporting.user_registrations.user_id, 
+       SUM(CASE WHEN reading_date <= date_add('day', 1, registration_time) THEN 1 ELSE 0 END) AS D1_Books_Opened,
+       COUNT(DISTINCT(CASE WHEN reading_date <= date_add('day', 1, registration_time) THEN book_id ELSE NULL END)) AS D1_Unique_Books_Opened,
+       SUM(CASE WHEN reading_date <= date_add('day', 1, registration_time) THEN reading_duration_seconds ELSE 0 END) AS D1_Secs_Read,
+       
+       SUM(CASE WHEN reading_date <= date_add('week', 1, registration_time) THEN 1 ELSE 0 END) AS W1_Books_Opened,
+       COUNT(DISTINCT(CASE WHEN reading_date <= date_add('week', 1, registration_time) THEN book_id ELSE NULL END)) AS W1_Unique_Books_Opened,
+       SUM(CASE WHEN reading_date <= date_add('week', 1, registration_time) THEN reading_duration_seconds ELSE 0 END) AS W1_Secs_Read
+FROM analytics_reporting.user_registrations 
+LEFT JOIN analytics_reporting.reading_activity_daily ON analytics_reporting.reading_activity_daily.user_id = analytics_reporting.user_registrations.user_id
+WHERE analytics_reporting.user_registrations.user_id IN (SELECT user_id FROM User_Info_Added)
+AND reading_date <= date_add('week', 1, registration_time)
+GROUP BY analytics_reporting.user_registrations.user_id)
+
+/* Final insert table */
+
+SELECT User_Info_Added.*, 
+       D1_Books_Opened,
+       D1_Unique_Books_Opened,
+       D1_Secs_Read,
+       W1_Books_Opened,
+       W1_Unique_Books_Opened,
+       W1_Secs_Read
+FROM User_Info_Added
+LEFT JOIN Grouped_User_Activity ON Grouped_User_Activity.user_id = User_Info_Added.user_id
+
+
+
+
