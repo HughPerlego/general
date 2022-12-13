@@ -1,55 +1,4 @@
 
-INSERT INTO athena_analytics.hw_hompeage_analysis_combined_table (
-user_id,
-view_date,
-Homepage_Views,
-Discover_View,
-Reffer_A_Friend_View,
-Reading_View,
-Want_To_Read_View,
-Completed_Read_View,
-Notebook_View,
-Workspace_Viewed,
-Workspace_Created,
-Search_Page_Views,
-AccountButton_Settings_View,
-AccountButton_Profile_View,
-Reading_Carousel_Book_Click,
-Reading_Carousel_Book_Open,
-Reading_Carousel_Book_Status_Update,
-Reading_Carousel_Book_Workspace_Added,
-Interests_Curated_Carousel_Book_Click,
-Interests_Curated_Carousel_Book_Opened,
-Interests_Curated_Carousel_Book_Status_Update,
-Interests_Curated_Carousel_Book_Workspace_Added,
-Reading_Section_Continue_Reading_book_cover,
-Reading_Section_Continue_Reading_book_open,
-Want_Section_Continue_Reading_book_cover,
-Want_Section_Continue_Reading_book_open,
-Want_Section_First_Reading_book_cover,
-Want_Section_First_Reading_book_open,
-Completed_Section_Continue_Reading_book_cover,
-Completed_Section_Continue_Reading_book_open,
-Completed_Section_First_Reading_book_cover,
-Completed_Section_First_Reading_book_open,
-Reading_List_Clicks,
-Book_Spotlight_Clicks,
-payment_channel_crude,
-user_persona , 
-acquisition_country,
-utm_medium, 
-utm_source, 
-study_level, 
-referrer_book, 
-converted_subscribed , 
-currently_subscribed,
-D1_Books_Opened,
-D1_Unique_Books_Opened,
-D1_Secs_Read,
-W1_Books_Opened,
-W1_Unique_Books_Opened,
-W1_Secs_Read)
-
 WITH Main_Homepage_Table AS (
 SELECT user_id, CAST(record_date as date) as view_date, COUNT(*) AS Homepage_Views 
 FROM prodgluegoldbuckets3database.event_tracking 
@@ -114,7 +63,7 @@ FROM prodgluegoldbuckets3database.event_tracking
 WHERE user_id IN (SELECT user_id FROM Main_Homepage_Table) 
 AND record_date >= CAST('2022-06-01' AS DATE)
 AND environment_name = 'Web Application'
-AND current_url LIKE 'https://www.perlego.com/search%'
+AND current_url = 'https://www.perlego.com/search'
 AND event_name = 'page view'
 GROUP BY user_id, CAST(record_date as date)),
 
@@ -272,15 +221,15 @@ LEFT JOIN Book_Spotlight_Views ON (Book_Spotlight_Views.user_id = Combined_Non_B
 
 User_Info_Added AS (
 SELECT All_Homepage_Events.*, 
-       CAST(payment_channel_crude as varchar(300)),
-       CAST(user_persona as varchar(300)), 
-       CAST(acquisition_country as varchar(300)),
-       CAST(utm_medium as varchar(300)), 
-       CAST(utm_source as varchar(300)), 
-       CAST(study_level as varchar(300)), 
+       CAST(payment_channel_crude as varchar(300)) as payment_channel_crude,
+       CAST(user_persona as varchar(300)) as user_persona, 
+       CAST(acquisition_country as varchar(300)) as acquisition_country,
+       CAST(utm_medium as varchar(300)) as utm_medium, 
+       CAST(utm_source as varchar(300)) as utm_source, 
+       CAST(study_level as varchar(300)) as study_level, 
        referrer_book, 
-       CAST(converted_subscribed as varchar(300)), 
-       CAST(currently_subscribed as varchar(300))
+       CAST(converted_subscribed as varchar(300)) as converted_subscribed, 
+       CAST(currently_subscribed as varchar(300)) as currently_subscribed
 FROM All_Homepage_Events
 LEFT JOIN analytics_reporting.user_registrations ON All_Homepage_Events.user_id = analytics_reporting.user_registrations.user_id),
 
@@ -299,19 +248,120 @@ FROM analytics_reporting.user_registrations
 LEFT JOIN analytics_reporting.reading_activity_daily ON analytics_reporting.reading_activity_daily.user_id = analytics_reporting.user_registrations.user_id
 WHERE analytics_reporting.user_registrations.user_id IN (SELECT user_id FROM User_Info_Added)
 AND reading_date <= date_add('week', 1, registration_time)
-GROUP BY analytics_reporting.user_registrations.user_id)
+GROUP BY analytics_reporting.user_registrations.user_id),
+
+/* find trial & subscription dates for D2C - to append via user id and date to main table - so can report status of the user  */
+
+User_Trial_Dates AS (
+SELECT user_id, reference_tables.ref_calendar_day.calendar_date, 'Trial' AS D2C_User_Status
+FROM analytics_reporting.user_conversion_summary 
+JOIN reference_tables.ref_calendar_day ON (CAST(trial_start_time as date) <= calendar_date AND calendar_date <= CAST(trial_end_time as date))
+AND User_id IN (SELECT user_id from Main_Homepage_Table)
+AND reference_tables.ref_calendar_day.calendar_date >= CAST('2022-06-01' as date)
+AND reference_tables.ref_calendar_day.calendar_date >= CAST(trial_start_time as date)
+AND trial_start_time IS NOT NULL),
+
+User_Subscribed_Dates AS (
+SELECT user_id, reference_tables.ref_calendar_day.calendar_date, 'Subscribed' AS D2C_User_Status
+FROM analytics_reporting.user_conversion_summary 
+JOIN reference_tables.ref_calendar_day ON (CAST(subscription_start_time as date) < calendar_date AND calendar_date < CAST(subscription_end_time as date))
+AND User_id IN (SELECT user_id from Main_Homepage_Table)
+AND reference_tables.ref_calendar_day.calendar_date >= CAST('2022-06-01' as date)
+AND reference_tables.ref_calendar_day.calendar_date >= CAST(subscription_start_time as date)
+AND subscription_start_time IS NOT NULL
+AND date_diff('day', subscription_start_time, subscription_end_time) > 1),
+
+Combined_User_Date_Table AS (
+SELECT *
+FROM User_Trial_Dates
+UNION ALL
+SELECT *
+FROM User_Subscribed_Dates),
+
+/* group to avoid duplication of dates due to duplicates in user conversion summary */
+
+Combined_User_Date_Table_Grouped AS (
+SELECT user_id, calendar_date, D2C_User_Status
+FROM Combined_User_Date_Table
+GROUP BY user_id, calendar_date, D2C_User_Status),
 
 /* Final insert table */
 
+Final_Table AS (
 SELECT User_Info_Added.*, 
        D1_Books_Opened,
        D1_Unique_Books_Opened,
        D1_Secs_Read,
        W1_Books_Opened,
        W1_Unique_Books_Opened,
-       W1_Secs_Read
+       W1_Secs_Read,
+       CASE WHEN payment_channel_crude = 'direct' AND D2C_User_Status IS NOT NULL THEN D2C_User_Status 
+            WHEN payment_channel_crude = 'direct' AND D2C_User_Status IS NULL THEN 'Other'
+            WHEN payment_channel_crude = 'indirect' THEN 'B2B' ELSE 'Other' END AS User_Status,
+       ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY view_date) AS User_Row_Number
 FROM User_Info_Added
 LEFT JOIN Grouped_User_Activity ON Grouped_User_Activity.user_id = User_Info_Added.user_id
+LEFT JOIN Combined_User_Date_Table_Grouped ON (Combined_User_Date_Table_Grouped.user_id = User_Info_Added.user_id 
+                                               AND Combined_User_Date_Table_Grouped.calendar_date = User_Info_Added.view_date))
+                                               
+SELECT  user_id,
+        view_date,
+        Homepage_Views,
+        Discover_View,
+        Reffer_A_Friend_View,
+        Reading_View,
+        Want_To_Read_View,
+        Completed_Read_View,
+        Notebook_View,
+        Workspace_Viewed,
+        Workspace_Created,
+        Search_Page_Views,
+        AccountButton_Settings_View,
+        AccountButton_Profile_View,
+        Reading_Carousel_Book_Click,
+        Reading_Carousel_Book_Open,
+        Reading_Carousel_Book_Status_Update,
+        Reading_Carousel_Book_Workspace_Added,
+        Interests_Curated_Carousel_Book_Click,
+        Interests_Curated_Carousel_Book_Opened,
+        Interests_Curated_Carousel_Book_Status_Update,
+        Interests_Curated_Carousel_Book_Workspace_Added,
+        Reading_Section_Continue_Reading_book_cover,
+        Reading_Section_Continue_Reading_book_open,
+        Want_Section_Continue_Reading_book_cover,
+        Want_Section_Continue_Reading_book_open,
+        Want_Section_First_Reading_book_cover,
+        Want_Section_First_Reading_book_open,
+        Completed_Section_Continue_Reading_book_cover,
+        Completed_Section_Continue_Reading_book_open,
+        Completed_Section_First_Reading_book_cover,
+        Completed_Section_First_Reading_book_open,
+        Reading_List_Clicks,
+        Book_Spotlight_Clicks,
+        payment_channel_crude,
+        user_persona , 
+        acquisition_country,
+        utm_medium, 
+        utm_source, 
+        study_level, 
+        referrer_book, 
+        converted_subscribed , 
+        currently_subscribed,
+        D1_Books_Opened,
+        D1_Unique_Books_Opened,
+        D1_Secs_Read,
+        W1_Books_Opened,
+        W1_Unique_Books_Opened,
+        W1_Secs_Read,
+        D2C_User_Status
+FROM Final_Table
+WHERE User_Row_Number = 1
+                                       
+            
+
+
+
+
 
 
 
