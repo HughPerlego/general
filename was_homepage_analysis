@@ -11,8 +11,7 @@ Completed_Read_View,
 Notebook_View,
 Workspace_Viewed,
 Workspace_Created,
-Homepage_Book_Searches,
-Homepage_Book_Searches_capped,
+Search_Page_Views,
 AccountButton_Settings_View,
 AccountButton_Profile_View,
 Reading_Carousel_Book_Click,
@@ -50,8 +49,6 @@ D1_Secs_Read,
 W1_Books_Opened,
 W1_Unique_Books_Opened,
 W1_Secs_Read)
-
-/* Main Homepage view table - to use as base table - all results limited to website */
 
 WITH Main_Homepage_Table AS (
 SELECT user_id, CAST(record_date as date) as view_date, COUNT(*) AS Homepage_Views 
@@ -109,53 +106,17 @@ OR (event_name = 'workspace created'))
 AND environment_name = 'Web Application'
 GROUP BY user_id, CAST(record_date as date)),
 
-/* Book Search - location marked as home - due to 2 second firing issue - will have to group terms together and mark as one search - otherwise count will be too high */
-Book_Search_Data AS (
-SELECT user_id, 
-       record_date, 
-       json_extract_scalar(event_properties, '$.searchTerm') as searchTerm,
-       LAG(json_extract_scalar(event_properties, '$.searchTerm'), 1) OVER (PARTITION BY user_id ORDER BY record_date) AS Previous_Search_term,
-       LAG(record_date, 1) OVER (PARTITION BY user_id ORDER BY record_date) AS Previous_search_date
-FROM event_tracking 
-WHERE user_id IS NOT NULL 
+/* udpating book search views - due to location not being populated after the 30th of october - will have to see what event was directly after the homepage for the user */
+
+Grouped_Search_Results AS (
+SELECT user_id, CAST(record_date as date) as view_date, COUNT(*) AS Search_Page_Views
+FROM prodgluegoldbuckets3database.event_tracking 
+WHERE user_id IN (SELECT user_id FROM Main_Homepage_Table) 
 AND record_date >= CAST('2022-06-01' AS DATE)
-AND event_name = 'book search'
 AND environment_name = 'Web Application'
-AND CAST(JSON_EXTRACT(event_properties, '$.location') as varchar) = 'home'
-ORDER BY user_id, record_date),
-
-/* add in fields comparing string and time difference to most recent search from that user  */
-Book_Search_Data_lag_fields as (
-SELECT Book_Search_Data.*, levenshtein_distance(searchTerm, Previous_Search_term) AS Leveshtein_Diff_Search_terms,
-                           date_diff('second', Previous_search_date, record_date) as seconds_after_previous_search,
-                           length(Previous_Search_term) as previous_search_term_character_length,
-                           CASE WHEN SUBSTR(searchTerm , 1, length(Previous_Search_term)) =
-                           Previous_Search_term THEN 1 ELSE 0 END AS Previous_Search_Subset
-FROM Book_Search_Data),
-
-/* Mark filter conditions to group results by, marking as part of the same search if 
-1) Previous_Search_Subset = 1 
-2) first search record e.g. leveshtein distance is null 
-3) Previous Search subset = 0 and leveshtein difference <= 3 - as it looks like in these cases a few characters have changed, but the substance of the search term is the same*/
-
-Mark_New_Search AS (
-SELECT *, 
-CASE WHEN Leveshtein_Diff_Search_terms IS NOT NULL and Previous_Search_Subset = 0 and Leveshtein_Diff_Search_terms >= 3 THEN 1 ELSE 0 END AS New_Search_Start,
- CASE WHEN lead(Leveshtein_Diff_Search_terms, 1) over (partition by user_id order by record_date) IS NOT NULL AND
-     lead(Previous_Search_Subset, 1) over (partition by user_id order by record_date) = 0 
-     AND 
-     lead(Leveshtein_Diff_Search_terms, 1) over (partition by user_id order by record_date) >= 3 THEN 1 ELSE 0 END AS End_Of_Current_Search
-FROM Book_Search_Data_lag_fields),
-
-/* group by user and date with filter conditions to remove clear duplicates caused by 2 second firing event */
-Grouped_Book_Searches AS (
-SELECT user_id, 
-       CAST(record_date as date) as view_date,
-       COUNT(*) AS Homepage_Book_Searches
-FROM Mark_New_Search
-WHERE New_Search_Start = 1 or (End_Of_Current_Search = 1 and Previous_Search_term <> searchTerm)
-GROUP BY user_id, 
-         CAST(record_date as date)),
+AND current_url LIKE 'https://www.perlego.com/search%'
+AND event_name = 'page view'
+GROUP BY user_id, CAST(record_date as date)),
 
 /* account settings options - don't seem to have evetn for clicking button - only for profile centre and settings */
 
@@ -178,16 +139,15 @@ GROUP BY user_id, CAST(record_date as date)),
 Combined_Non_Book_Open_Sections AS (
 SELECT Main_Homepage_Table.*, Discover_View, Reffer_A_Friend_View,
        Reading_View, Want_To_Read_View, Completed_Read_View, Notebook_View,
-       Workspace_Viewed, Workspace_Created, Homepage_Book_Searches,
-       CASE WHEN homepage_book_searches > homepage_views then homepage_views ELSE homepage_book_searches END AS Homepage_Book_Searches_capped,
+       Workspace_Viewed, Workspace_Created, Search_Page_Views,
        AccountButton_Settings_View, AccountButton_Profile_View
 FROM Main_Homepage_Table
 LEFT JOIN Sidebar_Page_Views ON (Sidebar_Page_Views.user_id = Main_Homepage_Table.user_id AND 
                                  Sidebar_Page_Views.view_date = Main_Homepage_Table.view_date)
 LEFT JOIN Workspace_User_Data ON (Workspace_User_Data.user_id = Main_Homepage_Table.user_id AND 
                                  Workspace_User_Data.view_date = Main_Homepage_Table.view_date)
-LEFT JOIN Grouped_Book_Searches ON (Grouped_Book_Searches.user_id = Main_Homepage_Table.user_id AND 
-                                 Grouped_Book_Searches.view_date = Main_Homepage_Table.view_date)
+LEFT JOIN Grouped_Search_Results ON (Grouped_Search_Results.user_id = Main_Homepage_Table.user_id AND 
+                                 Grouped_Search_Results.view_date = Main_Homepage_Table.view_date)
 LEFT JOIN Account_Button_Page_Views ON (Account_Button_Page_Views.user_id = Main_Homepage_Table.user_id AND                                                                                     Account_Button_Page_Views.view_date = Main_Homepage_Table.view_date)),
 
 /* find first book open times - used to determine which carousel book is opened from 
@@ -352,6 +312,7 @@ SELECT User_Info_Added.*,
        W1_Secs_Read
 FROM User_Info_Added
 LEFT JOIN Grouped_User_Activity ON Grouped_User_Activity.user_id = User_Info_Added.user_id
+
 
 
 
