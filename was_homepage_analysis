@@ -224,6 +224,7 @@ SELECT All_Homepage_Events.*,
        CAST(payment_channel_crude as varchar(300)) as payment_channel_crude,
        CAST(user_persona as varchar(300)) as user_persona, 
        CAST(acquisition_country as varchar(300)) as acquisition_country,
+       CAST(acquisition_region as varchar(300)) as acquisition_region,
        CAST(utm_medium as varchar(300)) as utm_medium, 
        CAST(utm_source as varchar(300)) as utm_source, 
        CAST(study_level as varchar(300)) as study_level, 
@@ -253,7 +254,7 @@ GROUP BY analytics_reporting.user_registrations.user_id),
 /* find trial & subscription dates for D2C - to append via user id and date to main table - so can report status of the user  */
 
 User_Trial_Dates AS (
-SELECT user_id, reference_tables.ref_calendar_day.calendar_date, 'Trial' AS D2C_User_Status
+SELECT user_id, reference_tables.ref_calendar_day.calendar_date, 'D2C Trial' AS D2C_User_Status
 FROM analytics_reporting.user_conversion_summary 
 JOIN reference_tables.ref_calendar_day ON (CAST(trial_start_time as date) <= calendar_date AND calendar_date <= CAST(trial_end_time as date))
 AND User_id IN (SELECT user_id from Main_Homepage_Table)
@@ -262,7 +263,7 @@ AND reference_tables.ref_calendar_day.calendar_date >= CAST(trial_start_time as 
 AND trial_start_time IS NOT NULL),
 
 User_Subscribed_Dates AS (
-SELECT user_id, reference_tables.ref_calendar_day.calendar_date, 'Subscribed' AS D2C_User_Status
+SELECT user_id, reference_tables.ref_calendar_day.calendar_date, 'D2C Subscribed' AS D2C_User_Status
 FROM analytics_reporting.user_conversion_summary 
 JOIN reference_tables.ref_calendar_day ON (CAST(subscription_start_time as date) < calendar_date AND calendar_date < CAST(subscription_end_time as date))
 AND User_id IN (SELECT user_id from Main_Homepage_Table)
@@ -296,9 +297,9 @@ SELECT User_Info_Added.*,
        W1_Unique_Books_Opened,
        W1_Secs_Read,
        CASE WHEN payment_channel_crude = 'direct' AND D2C_User_Status IS NOT NULL THEN D2C_User_Status 
-            WHEN payment_channel_crude = 'direct' AND D2C_User_Status IS NULL THEN 'Other'
-            WHEN payment_channel_crude = 'indirect' THEN 'B2B' ELSE 'Other' END AS User_Status,
-       ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY view_date) AS User_Row_Number
+            WHEN payment_channel_crude = 'direct' AND D2C_User_Status IS NULL THEN 'Unknown'
+            WHEN payment_channel_crude = 'indirect' THEN 'B2B' ELSE 'Unknown' END AS User_Status,
+       ROW_NUMBER() OVER (PARTITION BY User_Info_Added.user_id ORDER BY view_date) AS User_Row_Number
 FROM User_Info_Added
 LEFT JOIN Grouped_User_Activity ON Grouped_User_Activity.user_id = User_Info_Added.user_id
 LEFT JOIN Combined_User_Date_Table_Grouped ON (Combined_User_Date_Table_Grouped.user_id = User_Info_Added.user_id 
@@ -321,7 +322,7 @@ SELECT  user_id,
         Reading_Carousel_Book_Click,
         Reading_Carousel_Book_Open,
         Reading_Carousel_Book_Status_Update,
-        Reading_Carousel_Book_Workspace_Added,
+        Reading_Carousel_Workspace_Added,
         Interests_Curated_Carousel_Book_Click,
         Interests_Curated_Carousel_Book_Opened,
         Interests_Curated_Carousel_Book_Status_Update,
@@ -341,6 +342,7 @@ SELECT  user_id,
         payment_channel_crude,
         user_persona , 
         acquisition_country,
+        acquisition_region,
         utm_medium, 
         utm_source, 
         study_level, 
@@ -353,9 +355,9 @@ SELECT  user_id,
         W1_Books_Opened,
         W1_Unique_Books_Opened,
         W1_Secs_Read,
-        D2C_User_Status
+        CAST(User_Status as varchar(300)) AS User_Status
 FROM Final_Table
-WHERE User_Row_Number = 1
+
                                        
             
 
