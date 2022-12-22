@@ -1,14 +1,31 @@
 
-WITH Main_Homepage_Table AS (
-SELECT user_id, CAST(record_date as date) as view_date, COUNT(*) AS Homepage_Views 
+WITH All_HomePage_Views AS (
+
+SELECT user_id, record_date, 
+            FIRST_VALUE(CASE WHEN user_agent LIKE '%Windows%' OR user_agent LIKE '%Macintosh%' THEN 'Web Desktop'
+            WHEN user_agent LIKE '%Android%' OR user_agent LIKE '%Linux%' OR user_agent LIKE '%iPhone%' THEN 'Web Phone'
+            WHEN user_agent LIKE '%iPad%' OR user_agent LIKE '%X11%' THEN 'Web Tablet' ELSE 'Unknown' END) OVER 
+            (PARTITION BY user_id, CAST(record_date as date) ORDER BY record_date rows between unbounded preceding and unbounded following) as First_Traffic_Source
+            
 FROM prodgluegoldbuckets3database.event_tracking 
 WHERE user_id IS NOT NULL 
 AND record_date >= CAST('2022-06-01' AS DATE)
 AND event_name = 'page view'
 AND current_url = 'https://www.perlego.com/home'
-AND environment_name = 'Web Application'
-GROUP BY user_id, CAST(record_date as date)),
+AND environment_name = 'Web Application'),
 
+/* group results by user and date */
+
+Main_Homepage_Table AS (
+SELECT user_id, 
+       CAST(record_date as date) as view_date, 
+       CAST(First_Traffic_Source as varchar(300)) AS Web_Traffic_Source,
+       COUNT(*) AS Homepage_Views
+FROM All_HomePage_Views
+GROUP BY user_id, 
+         CAST(record_date as date),
+         CAST(First_Traffic_Source as varchar(300))),
+         
 /* create table getting views for each user and day for the sidebar -
 create case statements to determine how many times each day the buttons are clicked - 
 very high reading & want to read count which may be due to it accidently counting ereader session as a reading view - rather than the homepage- applying non referrer_url to try and remove these*/
@@ -307,6 +324,7 @@ LEFT JOIN Combined_User_Date_Table_Grouped ON (Combined_User_Date_Table_Grouped.
                                                
 SELECT  user_id,
         view_date,
+        Web_Traffic_Source,
         Homepage_Views,
         Discover_View,
         Reffer_A_Friend_View,
@@ -357,6 +375,16 @@ SELECT  user_id,
         W1_Secs_Read,
         CAST(User_Status as varchar(300)) AS User_Status
 FROM Final_Table
+
+                                       
+
+
+
+
+
+
+
+
 
                                        
             
