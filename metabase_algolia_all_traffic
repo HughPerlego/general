@@ -1,14 +1,22 @@
 WITH All_Books AS (
 
-SELECT analytics_reporting.books.book_id,
-        SUM(CASE WHEN reading_duration_minutes IS NULL THEN 0 ELSE reading_duration_minutes END) AS reading_minutes,
-        COUNT(DISTINCT(analytics_reporting.reading_activity_daily.user_id)) AS unique_users,
-        COUNT(analytics_reporting.reading_activity_daily.book_id) AS book_opened
-FROM analytics_reporting.books 
-LEFT JOIN analytics_reporting.reading_activity_daily ON analytics_reporting.reading_activity_daily.book_id = analytics_reporting.books.book_id
+SELECT analytics_reporting.books.book_id
+FROM analytics_reporting.books
 WHERE currently_activated = 'Y'
 GROUP BY analytics_reporting.books.book_id
 ),
+
+Reading_Activity_Recorded AS (
+
+SELECT book_id, 
+       SUM(CASE WHEN reading_duration_minutes IS NULL THEN 0 ELSE reading_duration_minutes END) AS reading_minutes,
+        COUNT(DISTINCT(analytics_reporting.reading_activity_daily.user_id)) AS unique_users,
+        COUNT(analytics_reporting.reading_activity_daily.book_id) AS book_opened
+FROM analytics_reporting.reading_activity_daily
+WHERE book_id in (select book_id from All_Books)
+AND reading_duration_seconds > 0
+GROUP BY book_id ),
+
 
 Grouped_Book_Views AS (
 SELECT book_id, SUM(unique_first_views) AS book_views_via_google 
@@ -16,7 +24,12 @@ FROM "reporting_layer"."view_book_views_via_google"
 WHERE book_id IN (SELECT book_id FROM All_Books)
 GROUP BY book_id)
 
-SELECT All_Books.*, CASE WHEN Book_Views_Via_Google IS NULL THEN 0 ELSE Book_Views_Via_Google END AS book_views_via_google
+SELECT All_Books.book_id,
+       CASE WHEN reading_minutes IS NULL THEN 0 ELSE reading_minutes END AS reading_minutes,
+       CASE WHEN unique_users IS NULL THEN 0 ELSE unique_users END AS unique_users,
+       CASE WHEN book_opened IS NULL THEN 0 ELSE book_opened END AS book_opened,
+       CASE WHEN Book_Views_Via_Google IS NULL THEN 0 ELSE Book_Views_Via_Google END AS book_views_via_google
 FROM All_Books
+LEFT JOIN Reading_Activity_Recorded ON Reading_Activity_Recorded.book_id = All_Books.book_id
 LEFT JOIN Grouped_Book_Views ON Grouped_Book_Views.book_id = All_Books.book_id
 ORDER BY reading_minutes DESC, unique_users DESC, Book_Opened DESC, Book_Views_Via_Google DESC 
