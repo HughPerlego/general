@@ -2,9 +2,7 @@ WITH B2B_users AS (
 SELECT analytics_reporting.user_registrations.user_id, registration_time, DATE_ADD('hour', 1, registration_time) AS First_Hour_Action
 FROM analytics_reporting.user_registrations 
 INNER JOIN analytics_reporting.partner_organisations ON analytics_reporting.partner_organisations.organisation_id = analytics_reporting.user_registrations.organisation_id
-LEFT JOIN analytics_reporting.user_group_codes ON analytics_reporting.user_group_codes.user_id = analytics_reporting.user_registrations.user_id 
-WHERE {{Organisation}}
-AND {{Client_Group}}),
+WHERE {{Organisation}}),
 
 Events_First_Hour 
 AS (
