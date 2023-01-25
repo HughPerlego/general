@@ -1,0 +1,174 @@
+    WITH LTV_Reffer_Bookids AS (
+SELECT referrer_book,
+    SUM(CASE WHEN converted_subscribed = 'Y' THEN 1 ELSE 0 END) AS Started_Subscription_LTV,
+    SUM(CASE WHEN converted_trial = 'Y' THEN 1 ELSE 0 END) AS Started_Trial_LTV
+FROM reporting.user_registrations
+WHERE utm_medium = 'organic'
+AND referrer_book IS NOT NULL
+GROUP BY referrer_book
+),
+
+Past_Year_Reffer_Bookids AS (
+SELECT referrer_book,
+    SUM(CASE WHEN converted_subscribed = 'Y' THEN 1 ELSE 0 END) AS Started_Subscription_1_Year,
+    SUM(CASE WHEN converted_trial = 'Y' THEN 1 ELSE 0 END) AS Started_Trial_1_Year
+FROM reporting.user_registrations
+LEFT JOIN reporting.books ON reporting.books.book_id = reporting.user_registrations.referrer_book
+WHERE utm_medium = 'organic'
+AND registration_time >= '2021-05-01'
+AND referrer_book IS NOT NULL
+GROUP BY referrer_book
+),
+
+Combined_Refer_Books AS (
+SELECT LTV_Reffer_Bookids.*, Started_Subscription_1_Year, Started_Trial_1_Year
+FROM LTV_Reffer_Bookids
+LEFT JOIN Past_Year_Reffer_Bookids ON Past_Year_Reffer_Bookids.referrer_book = LTV_Reffer_Bookids.referrer_book
+),
+
+ Combined_Book_Table AS (
+SELECT reporting.books.book_id, date_activated, currently_activated ,book_title, publisher_name, content_language,
+       format, subject_name, topic_name_1, author_1, Started_Subscription_LTV, Started_Trial_LTV,
+       Started_Subscription_1_Year, Started_Trial_1_Year, dlp,
+CASE
+        WHEN subject_name IN ('Art', 'Education', 'History', 'Languages & Linguistics', 'Law', 'Literature',
+                              'Media & Performing Arts', 'Personal Development', 'Philosophy',
+                              'Politics & International Relations', 'Study Aids', 'Theology & Religion')
+        THEN 'Humanities'
+        WHEN subject_name IN ('Social Sciences', 'Business', 'Economics', 'Psychology') THEN 'Social Science'
+        WHEN subject_name IN ('Architecture', 'Biological Sciences', 'Computer Science', 'Design', 'Mathematics',
+                              'Medicine', 'Physical Sciences', 'Technology & Engineering') THEN 'STEM' END Academic_discipline
+FROM reporting.books
+LEFT JOIN Combined_Refer_Books ON Combined_Refer_Books.referrer_book = reporting.books.book_id
+LEFT JOIN reporting_layer.book_dlp ON reporting_layer.book_dlp.book_id = reporting.books.book_id
+WHERE currently_activated = 'Y'),
+
+/* Page views - yearly  */
+
+Events_Within_Range AS (
+         SELECT *
+         FROM prod.event_tracking
+         WHERE record_date >= '2021-05-01'
+           AND record_date <= '2022-05-01'
+     ),
+          PageViews__Within_Range AS (
+              SELECT *
+              FROM Events_Within_Range
+              WHERE event_name = 'page view'
+                AND referrer_url like '%google%'
+                AND current_url like '%book%'
+                AND user_id IS NULL
+                AND unique_id IS NOT NULL
+                AND unique_id <> ''
+          ),
+
+/* filter to valid JSONS  */
+          Valid_JSON AS (
+              SELECT *
+              FROM PageViews__Within_Range
+              WHERE is_valid_json(event_properties) = TRUE),
+
+/* mark books with refer page google - missing user id (before they set up their account) */
+          Google_Page_Views AS (
+              SELECT unique_id,
+                     record_date,
+                     event_id,
+                     event_properties,
+                     json_extract_path_text(event_properties, 'content_ids') AS book_id
+              FROM Valid_JSON
+              WHERE json_extract_path_text(event_properties, 'content_ids') <> ''),
+
+          grouped_user_book as (
+              select unique_id, book_id, min(record_date) as first_book_date
+              from Google_Page_Views
+              where book_id is not null
+              group by unique_id, book_id
+          ),
+
+          Assign_row_number AS (
+              SELECT *,
+                     ROW_NUMBER() OVER (PARTITION BY unique_id ORDER BY first_book_date ASC) AS book_view_order,
+                     REPLACE(book_id, '[', '')                                               as book_id_clean
+              FROM grouped_user_book),
+
+Filtered_first_view as (
+     SELECT CAST(REPLACE(book_id_clean, ']', '') AS INT) as Book_id,
+            COUNT(DISTINCT (unique_id))                  AS Unique_first_views_Past_year
+     FROM Assign_row_number
+     WHERE book_view_order = 1
+     GROUP BY REPLACE(book_id_clean, ']', '')),
+
+First_View_Table_Join AS (
+SELECT
+       Combined_Book_Table.book_id,
+       date_activated,
+       CASE WHEN date_activated < '2021-05-01' THEN datediff(month, '2021-05-01', getdate())
+           ELSE datediff(month, date_activated, getdate()) END AS Months_Since_Book_Live,
+       currently_activated,
+       book_title,
+       publisher_name,
+       content_language,
+       format,
+       subject_name,
+       topic_name_1,
+       author_1,
+       dlp,
+       academic_discipline,
+       CASE WHEN Started_Subscription_1_Year is null then 0 else Started_Subscription_1_Year end as Started_Subscription_1_Year,
+       CASE WHEN Started_Trial_1_Year is null then 0 else Started_Trial_1_Year end as Started_Trial_1_Year,
+       CASE WHEN Filtered_first_view.Unique_first_views_Past_year IS NULL THEN 0 ELSE Unique_first_views_Past_year END AS Unique_first_views_Past_year
+FROM Combined_Book_Table
+LEFT JOIN Filtered_first_view ON Filtered_first_view.Book_id = Combined_Book_Table.book_id
+),
+
+Mark_Conversion_Rates AS (
+SELECT book_id,
+       date_activated,
+       Months_Since_Book_Live,
+       currently_activated,
+       book_title,
+       publisher_name,
+       content_language,
+       format,
+       subject_name,
+       topic_name_1,
+       author_1,
+       ROUND(dlp, 3) AS DLP,
+       ROUND(1.0*(Unique_first_views_Past_year) /  (Months_Since_Book_Live + 1), 3) AS AVG_Month_Views_12,
+       ROUND(1.0*(Started_Trial_1_Year) /  (Months_Since_Book_Live + 1), 3) AS AVG_Month_Trials_12,
+       ROUND(1.0*(Started_Subscription_1_Year) /  (Months_Since_Book_Live + 1), 3) AS AVG_Month_Subs_12,
+
+       CASE WHEN Academic_discipline is null or Academic_discipline = 'STEM' THEN 1.7
+            WHEN Academic_discipline IN ('Humanities', 'Social Science') and dlp is null then 2.6
+
+     WHEN Academic_discipline = 'Humanities' and dlp < 5 then 0.7
+     WHEN Academic_discipline = 'Humanities' and dlp >= 5 and dlp < 10 then 2
+     WHEN Academic_discipline = 'Humanities' and dlp >= 10 and dlp < 15 then 3.1
+     WHEN Academic_discipline = 'Humanities' and dlp >= 15 and dlp < 20 then 3.3
+     WHEN Academic_discipline = 'Humanities' and dlp >= 20 and dlp < 25 then 4.3
+     WHEN Academic_discipline = 'Humanities' and dlp >= 25 and dlp < 30 then 5.1
+     WHEN Academic_discipline = 'Humanities' and dlp >= 30 and dlp < 40 then 4
+     WHEN Academic_discipline = 'Humanities' and dlp >= 40 then 6.3
+
+     WHEN Academic_discipline = 'Social Science' and dlp < 5 then 1.5
+     WHEN Academic_discipline = 'Social Science' and dlp >= 5 and dlp < 10 then 2.4
+     WHEN Academic_discipline = 'Social Science' and dlp >= 10 and dlp < 15 then 2.4
+     WHEN Academic_discipline = 'Social Science' and dlp >= 15 and dlp < 20 then 3.3
+     WHEN Academic_discipline = 'Social Science' and dlp >= 20 and dlp < 25 then 6.6
+     WHEN Academic_discipline = 'Social Science' and dlp >= 25 and dlp < 30 then 4.7
+     WHEN Academic_discipline = 'Social Science' and dlp >= 30 and dlp < 40 then 6.2
+     WHEN Academic_discipline = 'Social Science' and dlp >= 40 and dlp < 50 then 5.3
+     WHEN Academic_discipline = 'Social Science' and dlp >= 50 and dlp < 60 then 6
+     WHEN Academic_discipline = 'Social Science' and dlp >= 60 then 7.6
+           ELSE NULL END AS conversion_rate
+
+FROM First_View_Table_Join)
+
+SELECT book_id,
+       CASE WHEN AVG_Month_Subs_12 IS NULL THEN 0 ELSE ROUND(AVG_Month_Subs_12, 3) END AS Average_Subscriptions_Per_Month,
+       CASE WHEN AVG_Month_Trials_12 IS NULL THEN 0 ELSE ROUND(AVG_Month_Trials_12, 3) END AS Average_Trials_Per_Month,
+       CASE WHEN AVG_Month_Views_12 IS NULL THEN 0 ELSE ROUND((1.0*AVG_Month_Views_12) * (conversion_rate / 100), 3) END AS TVM,
+       conversion_rate AS estimated_conversion_rate
+FROM Mark_Conversion_Rates
+ORDER BY Average_Subscriptions_Per_Month DESC, Average_Trials_Per_Month DESC, TVM DESC, conversion_rate DESC
+
