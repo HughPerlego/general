@@ -1,0 +1,117 @@
+WITH 
+
+/* select all books - as they all need to be in the list - also mark academic discpline of each book - to be used for the estimated conversion rate - also join to reporting layer view table to get dlp */
+
+All_Books AS (
+SELECT rb.book_id, 
+       CASE WHEN rb.subject_name IN ('Art', 'Education', 'History', 'Languages & Linguistics',                                'Law', 'Literature', 'Media & Performing Arts', 
+                                      'Personal Development', 'Philosophy', 'Politics & International Relations', 'Study Aids',                  'Theology & Religion') THEN 'Humanities'
+        WHEN rb.subject_name IN ('Social Sciences', 'Business', 'Economics', 'Psychology') THEN                         'Social Science'
+        WHEN rb.subject_name IN ('Architecture', 'Biological Sciences', 'Computer Science',                             'Design','Mathematics', 'Medicine', 'Physical Sciences',                               'Technology & Engineering') THEN 'STEM' END Academic_discipline, 
+        
+        CASE WHEN gbp_price_exvat > 0 THEN gbp_price_exvat 
+            WHEN gbp_price_exvat = 0 AND usd_price_exvat > 0 THEN (usd_price_exvat * 0.83) 
+            WHEN gbp_price_exvat = 0 AND usd_price_exvat = 0 THEN (eur_price_exvat * 0.85) END AS DLP
+        
+        
+FROM analytics_reporting.books as rb
+LEFT JOIN reporting_layer.view_books ON reporting_layer.view_books.book_id = rb.book_id
+WHERE currently_activated = 'Y'
+),
+
+/* hardcoe conersion rates - group by bookid as  */
+
+Conversion_Rates_Added AS (
+
+SELECT book_id, 
+         MAX(CASE WHEN Academic_discipline is null or Academic_discipline = 'STEM' THEN 1.7
+              WHEN Academic_discipline IN ('Humanities', 'Social Science') and dlp is null then 2.6
+              WHEN Academic_discipline = 'Humanities' and dlp < 5 then 0.7
+              WHEN Academic_discipline = 'Humanities' and dlp >= 5 and dlp < 10 then 2
+              WHEN Academic_discipline = 'Humanities' and dlp >= 10 and dlp < 15 then 3.1
+              WHEN Academic_discipline = 'Humanities' and dlp >= 15 and dlp < 20 then 3.3
+              WHEN Academic_discipline = 'Humanities' and dlp >= 20 and dlp < 25 then 4.3
+              WHEN Academic_discipline = 'Humanities' and dlp >= 25 and dlp < 30 then 5.1
+              WHEN Academic_discipline = 'Humanities' and dlp >= 30 and dlp < 40 then 4
+              WHEN Academic_discipline = 'Humanities' and dlp >= 40 then 6.3
+
+              WHEN Academic_discipline = 'Social Science' and dlp < 5 then 1.5
+              WHEN Academic_discipline = 'Social Science' and dlp >= 5 and dlp < 10 then 2.4
+              WHEN Academic_discipline = 'Social Science' and dlp >= 10 and dlp < 15 then 2.4
+              WHEN Academic_discipline = 'Social Science' and dlp >= 15 and dlp < 20 then 3.3
+              WHEN Academic_discipline = 'Social Science' and dlp >= 20 and dlp < 25 then 6.6
+              WHEN Academic_discipline = 'Social Science' and dlp >= 25 and dlp < 30 then 4.7
+              WHEN Academic_discipline = 'Social Science' and dlp >= 30 and dlp < 40 then 6.2
+              WHEN Academic_discipline = 'Social Science' and dlp >= 40 and dlp < 50 then 5.3
+              WHEN Academic_discipline = 'Social Science' and dlp >= 50 and dlp < 60 then 6
+              WHEN Academic_discipline = 'Social Science' and dlp >= 60 then 7.6
+                  ELSE NULL END) AS estimated_conversion_rate
+FROM All_Books
+GROUP BY book_id
+),
+
+
+/* reading activity - also include last months activity */
+Reading_Activity_Recorded AS (
+
+SELECT book_id, 
+       SUM(CASE WHEN reading_duration_minutes IS NULL THEN 0 ELSE reading_duration_minutes END) AS reading_minutes,
+        COUNT(DISTINCT(analytics_reporting.reading_activity_daily.user_id)) AS unique_users,
+        COUNT(analytics_reporting.reading_activity_daily.book_id) AS book_opened,
+        
+        SUM(CASE WHEN reading_date >= date_add('month', -1, current_date) THEN reading_duration_minutes ELSE 0 END) AS reading_minutes_last_month,
+        COUNT(DISTINCT(CASE WHEN reading_date >= date_add('month', -1, current_date) THEN analytics_reporting.reading_activity_daily.user_id ELSE NULL END)) AS unique_users_last_month,
+        COUNT(CASE WHEN reading_date >= date_add('month', -1, current_date) THEN analytics_reporting.reading_activity_daily.book_id ELSE NULL END) AS book_opened_last_month
+FROM analytics_reporting.reading_activity_daily
+WHERE book_id in (select book_id from All_Books)
+AND reading_duration_seconds > 0
+GROUP BY book_id),
+
+/* include book views as ranking for books which have not been opened */
+
+Grouped_Book_Views AS (
+SELECT book_id,  
+      SUM(unique_first_views) AS book_views_via_google,
+      SUM(CASE WHEN from_day >= date_add('year', -1, from_day) THEN unique_first_views ELSE NULL END) as book_views_via_google_12_months
+FROM "reporting_layer"."view_book_views_via_google" 
+WHERE book_id IN (SELECT book_id FROM All_Books)
+GROUP BY book_id),
+
+/* trial & subscriptions per book - based on reffer books - only for users who have signed up within the past year  */
+
+Trials_Subscriptions AS (
+SELECT analytics_reporting.user_registrations.referrer_book,
+       1.0*(SUM(CASE WHEN converted_trial = 'Y' THEN 1 ELSE 0 END)) / 12 AS AVG_Month_Trials_12,
+       1.0*(SUM(CASE WHEN converted_subscribed = 'Y' THEN 1 ELSE 0 END)) / 12 AS AVG_Month_Subs_12
+FROM analytics_reporting.user_registrations 
+WHERE payment_channel_crude = 'direct'
+AND referrer_book is not null
+AND registration_time >= date_add('year', -1, current_date)
+GROUP BY analytics_reporting.user_registrations.referrer_book)
+
+/* Final results table */
+
+SELECT Conversion_Rates_Added.book_id,
+       Conversion_Rates_Added.estimated_conversion_rate,
+
+       CASE WHEN reading_minutes IS NULL THEN 0 ELSE reading_minutes END AS reading_minutes,
+       CASE WHEN unique_users IS NULL THEN 0 ELSE unique_users END AS unique_users,
+       CASE WHEN book_opened IS NULL THEN 0 ELSE book_opened END AS book_opened,
+       
+       CASE WHEN reading_minutes_last_month IS NULL THEN 0 ELSE reading_minutes_last_month END AS reading_minutes_last_month,
+       CASE WHEN unique_users_last_month IS NULL THEN 0 ELSE unique_users_last_month END AS unique_users_last_month,
+       CASE WHEN book_opened_last_month IS NULL THEN 0 ELSE book_opened_last_month END AS book_opened_last_month,
+
+      CASE WHEN book_views_via_google IS NULL THEN 0 ELSE book_views_via_google END AS book_views_via_google,
+      
+       CASE WHEN book_views_via_google_12_months IS NULL THEN 0 ELSE 
+       ROUND((1.0*book_views_via_google_12_months) * (estimated_conversion_rate / 100), 3) END AS tvm,
+       
+       CASE WHEN AVG_Month_Trials_12 IS NULL THEN 0 ELSE ROUND(AVG_Month_Trials_12, 2) END AS average_trials_per_month,
+       CASE WHEN AVG_Month_Subs_12 IS NULL THEN 0 ELSE ROUND(AVG_Month_Subs_12, 2) END AS average_subscriptions_per_month
+       
+FROM Conversion_Rates_Added
+LEFT JOIN Reading_Activity_Recorded ON Reading_Activity_Recorded.book_id = Conversion_Rates_Added.book_id
+LEFT JOIN Grouped_Book_Views ON Grouped_Book_Views.book_id = Conversion_Rates_Added.book_id
+LEFT JOIN Trials_Subscriptions ON Trials_Subscriptions.referrer_book = Conversion_Rates_Added.book_id
+
