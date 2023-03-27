@@ -1,0 +1,111 @@
+with exchange_rates_latest as
+(
+SELECT exchange_rates_daily.currency, exchange_rates_daily.rate, exchange_rates_daily.rate_date
+FROM reporting_layer.exchange_rates_daily
+WHERE exchange_rates_daily.rate_date = ((SELECT "max"(exchange_rates_daily.rate_date) AS "max"
+                                               FROM reporting_layer.exchange_rates_daily))
+
+),
+
+subscription_interval as (
+select distinct id as subscription_id 
+, interval_count as plan_interval_count
+from prod_gold_bucket_database.subscriptions 
+),
+
+payments_made as (
+    /* Payments made against that subscription - across all time */
+    select i.subscription_id
+    , sum(c.amount / CASE
+                           WHEN c.currency = 'gbp' THEN 1 ELSE coalesce(erd.rate, erl.rate)
+                           END)/100 as paid_gbp
+    from prod_gold_bucket_database.charges c
+    join prod_gold_bucket_database.invoices i on c.invoice = i.id
+        /*joins to get daily exchange rates, but if missing takes a value from the latest rate view*/
+    left join reporting_layer.exchange_rates_daily erd on lower(c.currency) = lower(erd.currency) and date(c.created) = date(erd.rate_date)
+    left join exchange_rates_latest  erl on lower(c.currency) = lower(erl.currency)
+    where c.paid = true
+    and c.refunded = false
+    group by 1
+),
+
+     m1_payments as (
+        /* Payments made against that subscription - first month only */
+        select  subscription_id
+         , sum(sub.amount / CASE
+                           WHEN sub.currency = 'gbp' THEN 1 ELSE sub.rate
+                           END)/100 as paid_gbp
+                     from (
+                         select distinct i.subscription_id
+                             , c.amount
+                             , c.currency
+                             , coalesce(erd.rate, erl.rate) as rate
+                         from prod_gold_bucket_database.charges c
+                         join prod_gold_bucket_database.invoices i on c.invoice = i.id
+                         join prod_gold_bucket_database.invoice_line_items ili on i.id = ili.invoice_id
+                         join analytics_reporting.subscriptions s on i.subscription_id = s.src_subscription_id and s.subscription_type = 'subscribed'
+                             /*joins to get daily exchange rates, but if missing takes a value from the latest rate view*/
+                             left join reporting_layer.exchange_rates_daily erd on lower(c.currency) = lower(erd.currency) and date (c.created) = date(erd.rate_date)
+                         left join exchange_rates_latest  erl on lower(c.currency) = lower(erl.currency)
+                         where c.paid = true
+                         and c.refunded = false
+                         /* Here we are interested in payments related to their first month of subscription.
+                            Payment was not necessarily made in the first month, if there were payment failures.
+                            Therefore we are joining where the month of invoice period matches the month of subscription
+                            We get the invoice period from invoice_line_items because strangely the definition of the invoice
+                            period in the stripe invoice object is not the actual invoice period for our business model. */
+                         and date_trunc('month', ili.period_start) = (date_trunc('month', s.paid_start_timestamp))
+                         ) sub
+                     group by 1
+                     )
+
+
+/*new trials*/
+select distinct date(date_trunc('week', s.start_timestamp)) week_start
+, date_trunc('month', s.start_timestamp) month_start
+, s.start_timestamp as start_timestamp
+, s.end_timestamp as end_timestamp
+, 'trial' as label
+, s.user_id
+, ur.acquisition_region
+, ur.acquisition_country
+, ur.utm_source
+, ur.utm_medium
+, s.billing_frequency
+-- , s.plan_interval_count
+, 0.0 as payments_gbp /* trial payment values are always zero but keeping the data structure so that the union works */
+, 0.0 as gbp_m1 /* m1 values are not relevant for trials but keeping the data structure so that the union works */
+from reporting_layer.subscriptions s
+left join reporting_layer.view_user_registrations ur on s.user_id = ur.user_id
+where date(s.start_timestamp) >= date_add('week', -5,current_date)
+and s.subscription_type = 'trial'
+and s.payment_channel = 'direct'
+union all
+/*new subscribers*/
+select distinct date(date_trunc('week', s.paid_start_timestamp)) week_start
+, date_trunc('month', s.paid_start_timestamp) month_start
+, s.paid_start_timestamp
+, s.paid_end_timestamp
+, 'subscription' as label
+, s.user_id
+, ur.acquisition_region
+, ur.acquisition_country
+, ur.utm_source
+, ur.utm_medium
+, s.billing_frequency
+-- , s.plan_interval_count
+, pm.paid_gbp
+/* For gbp_m1 we need to take into account that m1 payment for annual or semester plans needs to be apportioned */
+, case when s.billing_frequency = 'year' then m1.paid_gbp/12 else m1.paid_gbp/si.plan_interval_count end as gbp_m1
+from analytics_reporting.subscriptions s
+join subscription_interval si on s.src_subscription_id = si.subscription_id 
+left join payments_made pm on s.src_subscription_id = pm.subscription_id
+left join m1_payments m1 on s.src_subscription_id = m1.subscription_id
+left join reporting_layer.view_user_registrations ur on s.user_id = ur.user_id
+    /*join again to the subscriptions table to exclude users who had a previous PAID subscription (i.e. they are rejoining) */
+left join analytics_reporting.subscriptions s2 on s.user_id = s2.user_id and s2.payment_channel = 'direct' and s2.subscription_type = 'subscribed' and s2.start_timestamp < s.start_timestamp and s2.paid_start_timestamp is not null
+where date(s.paid_start_timestamp) between  date_add('week', -5,current_date) and current_date
+and s.subscription_type = 'subscribed'
+and s.payment_channel = 'direct'
+and s2.user_id is null
+order by 1,2
