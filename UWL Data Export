@@ -1,0 +1,94 @@
+/* Select UWL users only */
+WITH 
+UWL_Users AS (
+SELECT user_id, user_type, acquisition_country, registration_time, platform_status, internal_persona 
+FROM analytics_reporting.user_registrations 
+WHERE organisation_id = 2055
+),
+
+/* Mark raw read records of UWL users - only include if duration > 0 - also cap total duration to reasonable limits - also create record date columns to join for session id
+- also apply reading date filter to only show read records which have been upoloaded to metabase 
+- only include read records which are the reading activity daily table so that reports align - issue of how to add in read records which appear more than 24hrs after the record date*/
+
+Filtered_Read_Records AS (
+SELECT  r.record_date,
+        r.book_id,
+        r.user_id,
+        r.environment,
+        DATE_TRUNC('day', record_date) as record_date_day,
+        DATE_TRUNC('month', record_date) as record_date_month,
+        DATE_TRUNC('hour', record_date) as record_date_hour,
+        CASE
+            WHEN environment = 'mobile'
+                AND DATE(record_date) >= DATE '2021-01-01'
+                AND duration > 300 THEN 300
+            ELSE CAST(duration AS DECIMAL(20, 2))
+        END AS capped_duration_seconds
+    FROM prod_gold_bucket_database.raw_read_records as r
+    INNER JOIN analytics_reporting.reading_activity_daily as rd ON (r.user_id = rd.user_id AND
+                                                                    r.book_id = rd.book_id AND 
+                                            DATE_TRUNC('day', r.record_date) = rd.reading_date)
+    WHERE duration > 0
+    AND r.user_id in (SELECT user_id FROM UWL_Users)
+    ),
+
+/* Work out first session id for each user, book, day, hour - will use to make rough esitamte of session id to read records - limit events to those use to mark ereader sessions in the first user acitvity tables & added a couple more from open book onwards - and those from a valid environment */
+
+First_Hour_Ereader_Session AS (
+SELECT *
+FROM (
+SELECT user_id, book_id, event_date, event_hour, session_id, session_start_time,
+       ROW_NUMBER() OVER (PARTITION BY user_id, book_id, event_date, event_hour ORDER BY session_start_time) AS row_num
+FROM (
+  SELECT user_id, book_id, session_id, event_timestamp,
+         DATE_TRUNC('day', event_timestamp) AS event_date,
+         DATE_TRUNC('hour', event_timestamp) AS event_hour,
+         MIN(event_timestamp) OVER (PARTITION BY user_id, book_id, session_id) AS session_start_time
+  FROM reporting_layer.view_session_events
+  WHERE environment_name IN ('Web Application', 'Mobile App')
+  AND event_name_master IN ('annotation creation', 'blur reader', 'focus reader',
+                          'book reference copied', 'bookmark creation',
+                          'chapter click from within book', 'copy text',
+                          'eye saver mode change', 'font family change',
+                          'font size change', 'highlight creation',
+                          'highlight removal', 'open chapter tab',
+                          'page or chapter load', 'open book', 'book menu tab opening',
+                          'keyword navigation', 'keyword search', 'open highlights tab',
+                          'open settings', 'open chapter tab', 'chapter navigation')
+AND user_id IN (SELECT user_id FROM UWL_Users)
+)
+)
+WHERE row_num = 1
+ORDER BY user_id, book_id, event_date, event_hour),
+
+/* join session id to read records table - cases when we don't have session id then mark as 9999*/
+
+Read_Session_Table AS (
+SELECT FR.*, COALESCE(session_id, '9999') as session_id, session_start_time
+FROM Filtered_Read_Records as FR
+LEFT JOIN First_Hour_Ereader_Session AS FS ON (FS.user_id = FR.user_id AND 
+                                               FS.book_id = FR.book_id AND
+                                               FS.event_date = FR.record_date_day AND
+                                               FS.event_hour = FR.record_date_hour)
+ ),
+ 
+/* aggregate to user id level  */
+
+User_Id_Level_Results AS (
+
+SELECT user_id, record_date_day,
+
+       COUNT(DISTINCT(session_id)) AS Total_Number_Sessions, 
+       COUNT(DISTINCT(book_id)) AS Total_Number_Unique_Books_Opened,
+       SUM(capped_duration_seconds) AS Total_Seconds_Read,
+
+       COUNT(DISTINCT(CASE WHEN DATE_DIFF('Month', record_date, current_date) < 1 THEN session_id ELSE NULL END)) AS Past_Month_Sessions,
+       COUNT(DISTINCT(CASE WHEN DATE_DIFF('Month', record_date, current_date) < 1 THEN book_id ELSE NULL END)) AS Past_Month_Unique_Books_Opened,
+       SUM(CASE WHEN DATE_DIFF('Month', record_date, current_date) < 1 THEN capped_duration_seconds ELSE NULL END) AS Past_Month_Seconds_Read
+FROM Read_Session_Table
+GROUP BY user_id, record_date_day
+)
+
+
+SELECT *
+FROM User_Id_Level_Results
