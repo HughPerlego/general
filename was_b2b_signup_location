@@ -1,3 +1,31 @@
+CREATE EXTERNAL TABLE athena_analytics.b2b_user_signup_location (
+
+user_id int,
+organisation_id int,
+date_joined timestamp,
+last_active timestamp,
+user_type int,
+is_deleted boolean,
+User_Signup_Location varchar(300)
+)
+
+LOCATION 's3://perlego-s3-reference-tb/athena_analytics/b2b_user_signup_location/'
+TBLPROPERTIES ('has_encrypted_data'='false');
+
+----------------
+
+INSERT INTO athena_analytics.b2b_user_signup_location (
+
+user_id,
+organisation_id,
+date_joined,
+last_active,
+user_type,
+is_deleted,
+User_Signup_Location
+)
+
+
 /* B2B Signup Script V1 */
 
 /* Select users we are looking at  */
@@ -108,3 +136,5 @@ LEFT JOIN Combined_Signup_Methods ON Combined_Signup_Methods.user_id = B2B_Users
 
 SELECT *
 FROM Final_Table
+
+
