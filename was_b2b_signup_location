@@ -46,7 +46,7 @@ SELECT user_id, 'Auto Account Creation' AS B2B_Signup_Path, record_date as first
 FROM prod_gold_bucket_database.event_tracking 
 WHERE user_id IN (SELECT user_id FROM B2B_Users)
 AND event_name = 'account creation'
-AND (try(cast(JSON_EXTRACT(event_properties, '$.b2bSignup') as varchar)) <> '' OR JSON_EXTRACT(event_properties, '$.b2bSignUpInfo') is not null))
+AND (try(cast(JSON_EXTRACT(event_properties, '$.create account') as varchar)) <> '' AND current_url not like '%group-register%')
 WHERE row_rank = 1),
 
 /* Use account creation without B2B properties to identify previous D2C users who were transferred  */
@@ -60,7 +60,7 @@ SELECT user_id, 'D2C Account Creation' AS B2B_Signup_Path, record_date as first_
 FROM prod_gold_bucket_database.event_tracking 
 WHERE user_id IN (SELECT user_id FROM B2B_Users)
 AND event_name = 'account creation'
-AND (JSON_EXTRACT(event_properties, '$.b2bSignUpInfo') is null OR (try(cast(JSON_EXTRACT(event_properties, '$.b2bSignup') as varchar)) = '')))
+AND (try(cast(JSON_EXTRACT(event_properties, '$.create account') as varchar)) <> '' AND current_url not like '%group-register%')
 WHERE row_rank = 1),
 
 /* find first uniquue id for each user id  */
@@ -136,5 +136,13 @@ LEFT JOIN Combined_Signup_Methods ON Combined_Signup_Methods.user_id = B2B_Users
 
 SELECT *
 FROM Final_Table
+
+-------------
+
+/* load new data by dropping table and re running script - will need to drop table here - as the old data is still stored 
+https://s3.console.aws.amazon.com/s3/buckets/perlego-s3-reference-tb?prefix=athena_analytics%2F&region=eu-west-2&showversions=false*/
+
+drop table b2b_user_signup_location
+
 
 
