@@ -1,0 +1,110 @@
+/* B2B Signup Script V1 */
+
+/* Select users we are looking at  */
+
+WITH B2B_Users AS (
+SELECT id as user_id, organisation_id, date_joined, last_active, user_type, is_deleted
+FROM prod_gold_bucket_database.users 
+WHERE organisation_id IS NOT NULL),
+
+/* Auto account creation - mark users who have evidence of signiging up via the auto account creation  */
+
+Auto_Account_Creation_Users AS (
+
+SELECT user_id, B2B_Signup_Path, first_timestamp
+FROM (
+SELECT user_id, 'Auto Account Creation' AS B2B_Signup_Path, record_date as first_timestamp,
+       ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY record_date) as row_rank
+FROM prod_gold_bucket_database.event_tracking 
+WHERE user_id IN (SELECT user_id FROM B2B_Users)
+AND event_name = 'account creation'
+AND (try(cast(JSON_EXTRACT(event_properties, '$.b2bSignup') as varchar)) <> '' OR JSON_EXTRACT(event_properties, '$.b2bSignUpInfo') is not null))
+WHERE row_rank = 1),
+
+/* Use account creation without B2B properties to identify previous D2C users who were transferred  */
+
+D2C_Account_Creation_Users AS (
+
+SELECT user_id, B2B_Signup_Path, first_timestamp
+FROM (
+SELECT user_id, 'D2C Account Creation' AS B2B_Signup_Path, record_date as first_timestamp,
+       ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY record_date) as row_rank
+FROM prod_gold_bucket_database.event_tracking 
+WHERE user_id IN (SELECT user_id FROM B2B_Users)
+AND event_name = 'account creation'
+AND (JSON_EXTRACT(event_properties, '$.b2bSignUpInfo') is null OR (try(cast(JSON_EXTRACT(event_properties, '$.b2bSignup') as varchar)) = '')))
+WHERE row_rank = 1),
+
+/* find first uniquue id for each user id  */
+
+First_unique_id_per_user AS (
+SELECT *
+FROM (
+SELECT *, row_number() over (PARTITION BY user_id ORDER BY first_unique_id_date) as row_rank
+FROM (
+SELECT user_id, unique_id, MIN(record_date) as first_unique_id_date
+FROM prod_gold_bucket_database.event_tracking
+WHERE user_id IN (SELECT user_id FROM B2B_Users)
+AND unique_id IS NOT NULL 
+AND unique_id <> ''
+GROUP BY user_id, unique_id
+) 
+) where row_rank = 1),
+
+/* SM email links - select unique ids which have landed on this page*/
+
+B2B_Email_Group_Register_Views AS (
+select First_unique_id_per_user.user_id, 'SM Email Signup' AS B2B_Signup_Path, MIN(record_date) as first_timestamp
+from prod_gold_bucket_database.event_tracking
+INNER join First_unique_id_per_user on First_unique_id_per_user.unique_id = prod_gold_bucket_database.event_tracking.unique_id 
+where current_url like '%utm_source=b2b_email_invite'
+AND current_url like '%group-register%'
+and event_name IN ('page view', 'Page View')
+and record_date >= cast('2022-12-01' as date)
+group by First_unique_id_per_user.user_id),
+
+/* Group Register Page - exclude cases where user id appears in other signup methods - as process for user top get to the page is different - this is more foucsed around the traditional method of a b2b admin link*/
+
+B2B_Admin_Links_Group_Register_Views AS (
+select First_unique_id_per_user.user_id, 'Group Register Page' AS B2B_Signup_Path, MIN(record_date) as first_timestamp
+from prod_gold_bucket_database.event_tracking
+INNER join First_unique_id_per_user on First_unique_id_per_user.unique_id = prod_gold_bucket_database.event_tracking.unique_id 
+where current_url like '%group-register%'
+and event_name IN ('page view', 'Page View')
+AND First_unique_id_per_user.user_id NOT IN (SELECT user_id FROM B2B_Email_Group_Register_Views)
+AND First_unique_id_per_user.user_id NOT IN (SELECT user_id FROM Auto_Account_Creation_Users)
+AND First_unique_id_per_user.user_id NOT IN (SELECT user_id FROM D2C_Account_Creation_Users)
+group by First_unique_id_per_user.user_id),
+
+/* union up signup methods and select first date in cases with duplicates - then left join to orgional table   */
+
+Combined_Signup_Methods AS (
+SELECT *
+FROM (
+SELECT *, ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY first_timestamp) as row_rank
+FROM (
+SELECT *
+FROM Auto_Account_Creation_Users
+UNION ALL 
+SELECT *
+FROM D2C_Account_Creation_Users
+UNION ALL
+SELECT *
+FROM B2B_Email_Group_Register_Views
+UNION ALL 
+SELECT *
+FROM B2B_Admin_Links_Group_Register_Views
+)
+) WHERE row_rank = 1
+),
+
+/* Combine to main user table - if missing and organisation is part of a single code org then assume single code was used - as we can't seem to link old single codes to individual users  */
+
+Final_Table AS (
+SELECT B2B_Users.*,
+       CASE WHEN (B2B_Signup_Path IS NULL OR B2B_Signup_Path = 'Group Register Page') AND organisation_id in (SELECT DISTINCT client_org_id FROM prodgluegoldbuckets3database.b2b_single_use_codes WHERE used = 1) THEN 'Single Use Code' ELSE COALESCE(B2B_Signup_Path, 'Unknown') END AS User_Signup_Location
+FROM B2B_Users
+LEFT JOIN Combined_Signup_Methods ON Combined_Signup_Methods.user_id = B2B_Users.user_id)
+
+SELECT *
+FROM Final_Table
