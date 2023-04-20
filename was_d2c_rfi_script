@@ -1,0 +1,222 @@
+CREATE EXTERNAL TABLE athena_analytics.d2c_subscribers_rfi (
+
+user_id int,
+src_subscription_id string,
+acquisition_region string,
+acquisition_country string,
+utm_medium string,
+utm_source string,
+billing_frequency string,
+subscription_start_date date,
+subscription_end_date date,
+subscription_end_date_reporting date,
+months_frist_subscription_start int,
+days_frist_subscription_start int,
+reporting_user_activity_first_date date,
+reporting_user_activity_last_date date,
+days_user_read int,
+unique_books_read int,
+books_opened int,
+total_minutes_read double,
+total_web_minutes_read double,
+total_mobile_minutes_read double,
+Intensity_Letter string,
+Intensity_Score int,
+Frequency_Letter string,
+Frequency_Score int,
+Recency_Letter string,
+Recency_Score int,
+Combined_Score int,
+Combined_Letters string)
+
+LOCATION 's3://perlego-s3-reference-tb/athena_analytics/d2c_subscribers_rfi/'
+TBLPROPERTIES ('has_encrypted_data'='false');
+
+INSERT INTO athena_analytics.d2c_subscribers_rfi (
+
+user_id,
+src_subscription_id,
+acquisition_region,
+acquisition_country,
+utm_medium,
+utm_source,
+billing_frequency,
+subscription_start_date,
+subscription_end_date,
+subscription_end_date_reporting,
+months_frist_subscription_start,
+days_frist_subscription_start,
+reporting_user_activity_first_date,
+reporting_user_activity_last_date,
+days_user_read,
+unique_books_read,
+books_opened,
+total_minutes_read,
+total_web_minutes_read,
+total_mobile_minutes_read,
+Intensity_Letter,
+Intensity_Score,
+Frequency_Letter,
+Frequency_Score,
+Recency_Letter,
+Recency_Score ,
+Combined_Score ,
+Combined_Letters)
+
+
+/* filter to D2C subscribers - also mark reporting cut off dates  */
+WITH D2C_User_Table AS (
+  SELECT 
+    user_id, 
+    src_subscription_id, 
+    stripe_customer_id, 
+    acquisition_region, 
+    billing_frequency, 
+    local_currency, 
+    round(1.0*(total_paid_gbp) / paid_months, 2) AS avg_payment_per_month,
+    CAST(start_timestamp AS date) AS start_time,
+    CAST(end_timestamp AS date) AS end_time,
+    CASE 
+      WHEN end_timestamp > current_date 
+        THEN CAST(date_diff('month', start_timestamp, current_date) as int)
+      ELSE CAST(date_diff('month', start_timestamp, end_timestamp) as int)
+    END AS subscribed_months,
+    CAST(CASE WHEN end_timestamp > current_date THEN current_date ELSE end_timestamp END as date) AS end_date_cutoff
+  FROM analytics_reporting.subscriptions 
+  WHERE payment_channel = 'direct'
+    AND subscription_type = 'subscribed'),
+    
+    /* create new record for each full month user has subscribed - then select first record for each month - also mark first and cut off date used when analysing user activity  */
+
+User_Subscription_Months_Table AS (
+SELECT user_id,
+       src_subscription_id,
+       acquisition_region,
+       billing_frequency,
+       start_time as subscription_start_date,
+       end_time as subscription_end_date, 
+       end_date_cutoff as subscription_end_date_reporting,
+       CAST(months_frist_subscription_start as int) as months_frist_subscription_start,
+       CAST(days_frist_subscription_start as int) as days_frist_subscription_start,
+       DATE_ADD('month', (months_frist_subscription_start - 1), start_time) as reporting_user_activity_first_date,
+       calendar_date as reporting_user_activity_last_date
+FROM (
+SELECT *,  
+ROW_NUMBER() OVER (PARTITION BY user_id, src_subscription_id, months_frist_subscription_start ORDER BY days_frist_subscription_start ASC) as date_sub_order
+FROM (    
+SELECT *, 
+        DATE_DIFF('month', start_time, calendar_date) as months_frist_subscription_start,
+        DATE_DIFF('day', start_time, calendar_date) as days_frist_subscription_start
+FROM D2C_User_Table
+JOIN reference_tables.ref_calendar_day on (
+calendar_date >= start_time and calendar_date <= end_date_cutoff)
+)
+) WHERE date_sub_order = 1 AND months_frist_subscription_start > 0
+ORDER BY user_id, calendar_date),
+
+/* join to user activity that fits within reporting dates */
+
+User_Activity_Table AS (
+SELECT User_Subscription_Months_Table.user_id, 
+       User_Subscription_Months_Table.reporting_user_activity_first_date,
+       User_Subscription_Months_Table.src_subscription_id,
+       COUNT(DISTINCT(reading_date)) as unique_reading_days,
+       COUNT(DISTINCT(book_id)) as unique_books_read,
+       COUNT(*) as books_opened,
+       ROUND(SUM(reading_duration_minutes), 2) as mins_read,
+       ROUND(SUM(web_reading_duration_minutes) , 2) as web_mins_read,
+       ROUND(SUM(mobile_reading_duration_minutes) , 2) as mobile_mins_read
+FROM User_Subscription_Months_Table
+LEFT JOIN analytics_reporting.reading_activity_daily ON analytics_reporting.reading_activity_daily.user_id = User_Subscription_Months_Table.user_id 
+WHERE reading_date >= reporting_user_activity_first_date 
+AND reading_date < reporting_user_activity_last_date
+AND reading_duration_seconds > 0
+GROUP BY User_Subscription_Months_Table.user_id, 
+         User_Subscription_Months_Table.reporting_user_activity_first_date,
+         User_Subscription_Months_Table.src_subscription_id
+),
+
+/* coimbine user engagnment - also create RFI case statements */
+
+Combined_Table AS (
+
+SELECT *, CASE WHEN total_minutes_read < 1 THEN 'D'   
+           WHEN total_minutes_read >= 1 AND total_minutes_read < 15 THEN 'C'
+           WHEN total_minutes_read >= 15 AND total_minutes_read < 60 THEN 'B'
+           WHEN total_minutes_read >= 60 THEN 'A' ELSE NULL END AS Intensity_Letter,
+
+      CASE WHEN total_minutes_read < 1 THEN 1   
+           WHEN total_minutes_read >= 1 AND total_minutes_read < 15 THEN 2
+           WHEN total_minutes_read >= 15 AND total_minutes_read < 60 THEN 3
+           WHEN total_minutes_read >= 60 THEN 4 ELSE NULL END AS Intensity_Score,
+           
+      CASE WHEN unique_books_read = 0 THEN 'D'   
+           WHEN unique_books_read >= 1 AND unique_books_read < 2 THEN 'C'
+           WHEN unique_books_read >= 2 AND unique_books_read < 5 THEN 'B'
+           WHEN unique_books_read >= 5 THEN 'A' ELSE NULL END AS Frequency_Letter,
+
+      CASE WHEN unique_books_read = 0 THEN 1   
+           WHEN unique_books_read >= 1 AND unique_books_read < 2 THEN 2
+           WHEN unique_books_read >= 2 AND unique_books_read < 5 THEN 3
+           WHEN unique_books_read >= 5 THEN 4 ELSE NULL END AS Frequency_Score,  
+           
+    CASE WHEN days_user_read = 0 THEN 'D'   
+           WHEN days_user_read >= 1 AND days_user_read < 2 THEN 'C'
+           WHEN days_user_read >= 2 AND days_user_read < 5 THEN 'B'
+           WHEN days_user_read >= 5 THEN 'A' ELSE NULL END AS Recency_Letter,
+
+      CASE WHEN days_user_read = 0 THEN 1   
+           WHEN days_user_read >= 1 AND days_user_read < 2 THEN 2
+           WHEN days_user_read >= 2 AND days_user_read < 5 THEN 3
+           WHEN days_user_read >= 5 THEN 4 ELSE NULL END AS Recency_Score  
+FROM (
+SELECT User_Subscription_Months_Table.*,
+       CAST(COALESCE(unique_reading_days, 0) as int) as days_user_read,
+       CAST(COALESCE(unique_books_read, 0) as int) as unique_books_read,
+       CAST(COALESCE(books_opened, 0) as int) as books_opened,
+       CAST(COALESCE(mins_read, 0) as double) as total_minutes_read,
+       CAST(COALESCE(web_mins_read, 0) as double) as total_web_minutes_read,
+       CAST(COALESCE(mobile_mins_read, 0) as double) as total_mobile_minutes_read
+FROM User_Subscription_Months_Table
+LEFT JOIN User_Activity_Table 
+ON (User_Activity_Table.user_id = User_Subscription_Months_Table.user_id 
+AND User_Activity_Table.reporting_user_activity_first_date = User_Subscription_Months_Table.reporting_user_activity_first_date 
+AND User_Activity_Table.src_subscription_id = User_Subscription_Months_Table.src_subscription_id)
+)
+)
+
+SELECT Combined_Table.user_id,
+       src_subscription_id,
+       analytics_reporting.user_registrations.acquisition_region,
+       acquisition_country,
+       utm_medium,
+       utm_source,
+       billing_frequency,
+       subscription_start_date,
+       subscription_end_date,
+       subscription_end_date_reporting,
+       months_frist_subscription_start,
+       days_frist_subscription_start,
+       reporting_user_activity_first_date,
+       reporting_user_activity_last_date,
+       days_user_read,
+       unique_books_read,
+       books_opened,
+       total_minutes_read,
+       total_web_minutes_read,
+       total_mobile_minutes_read,
+       intensity_letter,
+       intensity_score,
+       frequency_letter,
+       frequency_score,
+       recency_letter,
+       recency_score,
+       (Recency_Score + Frequency_Score + Intensity_Score) AS Combined_Score,
+       CONCAT(Recency_Letter,Frequency_Letter,Intensity_Letter) AS Combined_Letters
+FROM Combined_Table
+LEFT JOIN analytics_reporting.user_registrations ON Combined_Table.user_id = analytics_reporting.user_registrations.user_id
+
+/* load new data by dropping table and re running script - will need to drop table here - as the old data is still stored 
+https://s3.console.aws.amazon.com/s3/buckets/perlego-s3-reference-tb?prefix=athena_analytics%2F&region=eu-west-2&showversions=false*/
+
+drop table athena_analytics.d2c_subscribers_rfi
