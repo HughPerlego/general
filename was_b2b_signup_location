@@ -6,13 +6,17 @@ date_joined timestamp,
 last_active timestamp,
 user_type int,
 is_deleted boolean,
-User_Signup_Location varchar(300)
+Final_Status_Internal varchar(300),
+B2B_Signup_Location varchar(300)
 )
 
 LOCATION 's3://perlego-s3-reference-tb/athena_analytics/b2b_user_signup_location/'
 TBLPROPERTIES ('has_encrypted_data'='false');
 
-----------------
+------------
+
+/* Insert table */
+
 
 INSERT INTO athena_analytics.b2b_user_signup_location (
 
@@ -22,7 +26,8 @@ date_joined,
 last_active,
 user_type,
 is_deleted,
-User_Signup_Location
+Final_Status_Internal,
+B2B_Signup_Location
 )
 
 
@@ -35,114 +40,99 @@ SELECT id as user_id, organisation_id, date_joined, last_active, user_type, is_d
 FROM prod_gold_bucket_database.users 
 WHERE organisation_id IS NOT NULL),
 
-/* Auto account creation - mark users who have evidence of signiging up via the auto account creation  */
+/* account creation - non group register views  */
 
-Auto_Account_Creation_Users AS (
-
-SELECT user_id, B2B_Signup_Path, first_timestamp
-FROM (
-SELECT user_id, 'Auto Account Creation' AS B2B_Signup_Path, record_date as first_timestamp,
-       ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY record_date) as row_rank
+Non_Group_Register_Account_Create AS (
+SELECT user_id, 
+       CASE WHEN record_date < cast('2023-02-01' as date) or (record_date >= cast('2023-02-01' as date) AND user_id NOT IN (select user_id from analytics_reporting.user_registrations where organisation_id in (193, 2054, 2055))) THEN 'D2C Account Creation'
+            WHEN user_id in (select user_id from analytics_reporting.user_registrations where organisation_id in (193, 2054, 2055))  AND record_date >= cast('2023-02-01' as date) AND 
+            user_id IN (SELECT user_id FROM reporting_layer.view_user_type_history WHERE timepoint = 1 AND user_type_id = 1) THEN 'Auto Account Creation' ELSE NULL END as User_Account_Non_Group_register
 FROM prod_gold_bucket_database.event_tracking 
 WHERE user_id IN (SELECT user_id FROM B2B_Users)
 AND event_name = 'account creation'
-AND (try(cast(JSON_EXTRACT(event_properties, '$.create account') as varchar)) <> '' AND current_url not like '%group-register%')
-WHERE row_rank = 1),
+AND current_url NOT LIKE '%group-register%'
+AND (current_url LIKE 'https://www.perlego.com/login%' OR current_url LIKE 'https://www.perlego.com/sign-up')),
 
-/* Use account creation without B2B properties to identify previous D2C users who were transferred  */
+/* Group Register Signup - Account creation event*/
 
-D2C_Account_Creation_Users AS (
-
-SELECT user_id, B2B_Signup_Path, first_timestamp
+Group_Register_Signup_Acc_Event AS (
+SELECT user_id, unique_id, first_timestamp, current_url, event_properties, CASE WHEN current_url LIKE '%utm_source=b2b_email_invite' THEN 1 ELSE 0 END as   email_invite,
+     CASE WHEN CAST(json_extract(full_extract, '$.utm_source') as varchar) = 'b2b_email_invite'
+     OR CAST(json_extract(full_extract, '$.UtmSource') as varchar) = 'b2b_email_invite' THEN 'SM Email - AccountCreation' ELSE 'Group Register Page Signup - Account Creation' END AS Group_Register_Status
 FROM (
-SELECT user_id, 'D2C Account Creation' AS B2B_Signup_Path, record_date as first_timestamp,
-       ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY record_date) as row_rank
+SELECT user_id, record_date as first_timestamp, current_url, event_properties, unique_id,
+       ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY record_date) as row_rank,
+       json_extract(event_properties, '$.utms') as full_extract
 FROM prod_gold_bucket_database.event_tracking 
 WHERE user_id IN (SELECT user_id FROM B2B_Users)
+AND user_id NOT IN (SELECT user_id FROM  Non_Group_Register_Account_Create)
 AND event_name = 'account creation'
-AND (try(cast(JSON_EXTRACT(event_properties, '$.create account') as varchar)) <> '' AND current_url not like '%group-register%')
-WHERE row_rank = 1),
+AND current_url like '%group-register%')
+WHERE row_rank = 1
+),
 
-/* find first uniquue id for each user id  */
+/* Group Register Signup - Account creation event */
 
-First_unique_id_per_user AS (
+Group_Register_Signup_Page_View_Event AS (
 SELECT *
 FROM (
-SELECT *, row_number() over (PARTITION BY user_id ORDER BY first_unique_id_date) as row_rank
+SELECT *, ROW_NUMBER() OVER (PARTITION BY unique_id ORDER BY first_timestamp ASC) as row_rank
 FROM (
-SELECT user_id, unique_id, MIN(record_date) as first_unique_id_date
-FROM prod_gold_bucket_database.event_tracking
-WHERE user_id IN (SELECT user_id FROM B2B_Users)
-AND unique_id IS NOT NULL 
-AND unique_id <> ''
-GROUP BY user_id, unique_id
-) 
-) where row_rank = 1),
+SELECT unique_id, user_id, CASE WHEN current_url like '%b2b_email_invite%' THEN 'SM Email - Page View' ELSE 'Group Register Page - Page View' END AS Group_Register_Status,
+       MIN(record_date) as first_timestamp 
+FROM prod_gold_bucket_database.event_tracking 
+WHERE unique_id in (
+SELECT unique_id
+FROM prod_gold_bucket_database.event_tracking 
+WHERE current_url like '%group-register%' 
+group by unique_id)
+AND user_id IN (SELECT user_id FROM B2B_Users)
+GROUP BY unique_id, user_id, CASE WHEN current_url like '%b2b_email_invite%' THEN 'SM Email - Page View' ELSE 'Group Register Page - Page View' END
+)
+) WHERE row_rank = 1),
 
-/* SM email links - select unique ids which have landed on this page*/
+/* Combine signups and filter to a single one for each user - as how signup is recorded seems to depend on when it was done */
 
-B2B_Email_Group_Register_Views AS (
-select First_unique_id_per_user.user_id, 'SM Email Signup' AS B2B_Signup_Path, MIN(record_date) as first_timestamp
-from prod_gold_bucket_database.event_tracking
-INNER join First_unique_id_per_user on First_unique_id_per_user.unique_id = prod_gold_bucket_database.event_tracking.unique_id 
-where current_url like '%utm_source=b2b_email_invite'
-AND current_url like '%group-register%'
-and event_name IN ('page view', 'Page View')
-and record_date >= cast('2022-12-01' as date)
-group by First_unique_id_per_user.user_id),
-
-/* Group Register Page - exclude cases where user id appears in other signup methods - as process for user top get to the page is different - this is more foucsed around the traditional method of a b2b admin link*/
-
-B2B_Admin_Links_Group_Register_Views AS (
-select First_unique_id_per_user.user_id, 'Group Register Page' AS B2B_Signup_Path, MIN(record_date) as first_timestamp
-from prod_gold_bucket_database.event_tracking
-INNER join First_unique_id_per_user on First_unique_id_per_user.unique_id = prod_gold_bucket_database.event_tracking.unique_id 
-where current_url like '%group-register%'
-and event_name IN ('page view', 'Page View')
-AND First_unique_id_per_user.user_id NOT IN (SELECT user_id FROM B2B_Email_Group_Register_Views)
-AND First_unique_id_per_user.user_id NOT IN (SELECT user_id FROM Auto_Account_Creation_Users)
-AND First_unique_id_per_user.user_id NOT IN (SELECT user_id FROM D2C_Account_Creation_Users)
-group by First_unique_id_per_user.user_id),
-
-/* union up signup methods and select first date in cases with duplicates - then left join to orgional table   */
-
-Combined_Signup_Methods AS (
+Combined_Group_Register_Users AS (
 SELECT *
 FROM (
 SELECT *, ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY first_timestamp) as row_rank
 FROM (
-SELECT *
-FROM Auto_Account_Creation_Users
+SELECT unique_id, user_id, first_timestamp, Group_Register_Status
+FROM Group_Register_Signup_Acc_Event
 UNION ALL 
-SELECT *
-FROM D2C_Account_Creation_Users
-UNION ALL
-SELECT *
-FROM B2B_Email_Group_Register_Views
-UNION ALL 
-SELECT *
-FROM B2B_Admin_Links_Group_Register_Views
+SELECT unique_id, user_id, first_timestamp, Group_Register_Status
+FROM Group_Register_Signup_Page_View_Event
 )
-) WHERE row_rank = 1
-),
+) WHERE row_rank = 1),
 
-/* Combine to main user table - if missing and organisation is part of a single code org then assume single code was used - as we can't seem to link old single codes to individual users  */
 
-Final_Table AS (
-SELECT B2B_Users.*,
-       CASE WHEN (B2B_Signup_Path IS NULL OR B2B_Signup_Path = 'Group Register Page') AND organisation_id in (SELECT DISTINCT client_org_id FROM prodgluegoldbuckets3database.b2b_single_use_codes WHERE used = 1) THEN 'Single Use Code' ELSE COALESCE(B2B_Signup_Path, 'Unknown') END AS User_Signup_Location
+Combined_Table AS (
+SELECT B2B_Users.*, Group_Register_Status, User_Account_Non_Group_register,
+       COALESCE(Group_Register_Status, User_Account_Non_Group_register, 'Unknown') AS Final_Status_Internal,
+       CASE WHEN Group_Register_Status IN ('SM Email - Page View', 'SM Email - AccountCreation') THEN 'SM Email Signup'
+            WHEN Group_Register_Status IN ('Group Register Page - Page View', 'Group Register Page Signup - Account Creation') THEN 'Group Register Page Signup' ELSE COALESCE(Group_Register_Status, User_Account_Non_Group_register, 'Unknown') END AS B2B_Signup_Location
 FROM B2B_Users
-LEFT JOIN Combined_Signup_Methods ON Combined_Signup_Methods.user_id = B2B_Users.user_id)
+LEFT JOIN Combined_Group_Register_Users ON Combined_Group_Register_Users.user_id = B2B_Users.user_id
+LEFT JOIN Non_Group_Register_Account_Create ON Non_Group_Register_Account_Create.user_id = B2B_Users.user_id
+)
 
-SELECT *
-FROM Final_Table
 
--------------
+/* for unknown / group register for D2C organisations assume single use code was used  */
+
+SELECT user_id, 
+       organisation_id,
+       date_joined,
+       last_active,
+       user_type,
+       is_deleted,
+       Final_Status_Internal,
+       CASE WHEN B2B_Signup_Location IN ('Unknown', 'Group Register Page Signup') AND organisation_id IN (1,51,183,222,280,293,303,2019,2021,2098) THEN 'Single Use Code' ELSE B2B_Signup_Location END AS B2B_Signup_Location
+FROM Combined_Table
+
 
 /* load new data by dropping table and re running script - will need to drop table here - as the old data is still stored 
 https://s3.console.aws.amazon.com/s3/buckets/perlego-s3-reference-tb?prefix=athena_analytics%2F&region=eu-west-2&showversions=false*/
 
 drop table b2b_user_signup_location
-
-
 
