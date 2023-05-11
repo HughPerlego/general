@@ -56,7 +56,9 @@ CREATE EXTERNAL TABLE athena_analytics.free_trial_remove_exp (
 
 visitor_id varchar(300),
 experiment_id varchar(300),
+experiment_name varchar(300),
 variation_id varchar(300),
+variation_name varchar(300),
 first_event_time timestamp,
 last_event_time timestamp,
 vistor_in_event_tracking int,
@@ -73,7 +75,9 @@ INSERT INTO athena_analytics.free_trial_remove_exp (
 
 visitor_id,
 experiment_id,
+experiment_name,
 variation_id,
+variation_name,
 first_event_time,
 last_event_time,
 vistor_in_event_tracking,
@@ -85,11 +89,15 @@ user_id
 /* remove duplicates at visitor id level assuming experinment & variation is the same  */
 WITH Grouped_Optimizely_File AS (
 
-SELECT visitor_id, experiment_id, variation_id, 
+SELECT visitor_id, experiment_id, 'A/A' AS experiment_name, variation_id, 
+       CASE WHEN variation_id = '24089420947' THEN 'Control'
+            WHEN variation_id = '24125880079' THEN 'Variation' ELSE NULL END AS variation_name,
        MIN(record_timestamp) as first_event_time,
        MAX(record_timestamp) as last_event_time
 FROM reference_tables.optimizely_visitors
-GROUP BY visitor_id, experiment_id, variation_id
+GROUP BY visitor_id, experiment_id, variation_id, 
+         CASE WHEN variation_id = '24089420947' THEN 'Control'
+              WHEN variation_id = '24125880079' THEN 'Variation' ELSE NULL END
 ),
 
 /* mark how visitors can be identified  */
@@ -126,3 +134,11 @@ LEFT JOIN Unique_visitors_identified ON Unique_visitors_identified.unique_id = G
 LEFT JOIN Unique_users_identified ON Unique_users_identified.unique_id = Grouped_Optimizely_File.visitor_id 
 
 DROP TABLE athena_analytics.free_trial_remove_exp
+
+select *
+from athena_analytics.free_trial_remove_exp
+
+/* 
+https://s3.console.aws.amazon.com/s3/buckets/perlego-s3-reference-tb?region=eu-west-2&prefix=athena_analytics/free_trial_remove_exp/&showversions=false
+*/
+
