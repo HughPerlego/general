@@ -1,0 +1,189 @@
+CREATE EXTERNAL TABLE athena_analytics.free_trial_per_14 (
+
+visitor_id varchar(300),
+experiment_id varchar(300),
+experiment_name varchar(8),
+variation_id varchar(300),
+variation_name varchar(9),
+first_event_time timestamp,
+last_event_time timestamp,
+event_tracking_first_date timestamp,
+vistor_in_event_tracking int,
+vistor_created_account int,
+user_id int,
+user_id_visitor_order int,
+trial_start_time timestamp,
+trial_end_time timestamp,
+trial_cancel_time timestamp,
+trial_within_exp_range int,
+sub_start_time timestamp,
+sub_end_time timestamp,
+sub_cancel_time timestamp,
+sub_within_exp_range int,
+registration_time timestamp,
+user_status varchar(37),
+part_of_exp int
+)
+
+LOCATION 's3://perlego-s3-reference-tb/athena_analytics/free_trial_per_14/'
+TBLPROPERTIES ('has_encrypted_data'='false');
+
+drop table athena_analytics.free_trial_per_14
+
+/* 
+https://s3.console.aws.amazon.com/s3/buckets/perlego-s3-reference-tb?region=eu-west-2&prefix=athena_analytics/free_trial_remove_exp/&showversions=false
+*/
+
+/* Insert table */
+
+INSERT INTO athena_analytics.free_trial_per_14 (
+
+visitor_id,
+experiment_id,
+experiment_name,
+variation_id,
+variation_name,
+first_event_time,
+last_event_time,
+event_tracking_first_date,
+vistor_in_event_tracking,
+vistor_created_account,
+user_id,
+user_id_visitor_order,
+trial_start_time,
+trial_end_time,
+trial_cancel_time,
+trial_within_exp_range,
+sub_start_time,
+sub_end_time,
+sub_cancel_time,
+sub_within_exp_range,
+registration_time,
+user_status,
+part_of_exp
+)
+
+
+/* remove duplicates at visitor id level assuming experinment & variation is the same  */
+WITH Grouped_Optimizely_File AS (
+
+SELECT visitor_id, experiment_id, 'Per 14.0' AS experiment_name, variation_id, 
+       CASE WHEN variation_id = '24111350262' THEN 'Control'
+            WHEN variation_id = '24113420093' THEN 'Variation' ELSE NULL END AS variation_name,
+       MIN(record_timestamp) as first_event_time,
+       MAX(record_timestamp) as last_event_time
+FROM reference_tables.optimizely_visitors
+GROUP BY visitor_id, experiment_id, variation_id, 
+         CASE WHEN variation_id = '24111350262' THEN 'Control'
+              WHEN variation_id = '24113420093' THEN 'Variation' ELSE NULL END
+),
+
+/* mark how visitors can be identified  */
+
+Unique_visitors_identified AS (
+select unique_id, 1 as identified_in_tracking_service, MIN(Record_date) as event_tracking_first_date
+from prod_gold_bucket_database.event_tracking 
+WHERE unique_id IN (SELECT visitor_id FROM Grouped_Optimizely_File)
+GROUP BY unique_id),
+
+/* find first user id associated with the visitor id  */
+
+Unique_users_identified AS (
+SELECT unique_id, user_id, 1 AS visitor_created_account
+FROM (
+SELECT *, ROW_NUMBER() OVER (PARTITION BY unique_id ORDER BY first_date_seen ASC) as row_rank
+FROM (
+SELECT unique_id, user_id, MIN(record_date) as first_date_seen
+FROM prod_gold_bucket_database.event_tracking 
+WHERE unique_id IN (SELECT visitor_id FROM Grouped_Optimizely_File)
+AND user_id IS NOT NULL
+GROUP BY unique_id, user_id)
+) WHERE row_rank = 1
+),
+
+/* Join to previous tables to this one - also create case statement not counting duplicate visitor ids for the same user - filter to 1 for each user */
+
+Combined_File AS (
+SELECT *
+FROM (
+SELECT Grouped_Optimizely_File.*, 
+       event_tracking_first_date,
+       COALESCE(identified_in_tracking_service, 0) AS vistor_in_event_tracking,
+       COALESCE(visitor_created_account, 0) AS vistor_created_account,
+       user_id,
+       CAST(CASE WHEN user_id IS NOT NULL THEN ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY event_tracking_first_date ASC) ELSE 1 END AS INT) AS user_id_visitor_order
+FROM Grouped_Optimizely_File
+LEFT JOIN Unique_visitors_identified ON Unique_visitors_identified.unique_id = Grouped_Optimizely_File.visitor_id 
+LEFT JOIN Unique_users_identified ON Unique_users_identified.unique_id = Grouped_Optimizely_File.visitor_id)
+WHERE user_id_visitor_order = 1),
+
+/* asign user status - to be added to combined table for dashboard filtering */
+
+Trial_user_info AS (
+SELECT *
+FROM (
+SELECT Combined_File.user_id, 
+       src_subscription_id AS trial_subscription_id,
+       start_timestamp as trial_start_time, 
+       end_timestamp as trial_end_time,
+       subscription_canceled_at as trial_cancel_time, 
+       ROW_NUMBER() OVER (PARTITION BY Combined_File.user_id ORDER BY start_timestamp DESC) AS user_trial_row,
+       CASE WHEN start_timestamp >= CAST('2023-05-12' AS DATE) THEN 1 ELSE 0 END AS trial_within_exp_range
+FROM Combined_File
+LEFT JOIN analytics_reporting.subscriptions ON Combined_File.user_id = analytics_reporting.subscriptions.user_id 
+WHERE Combined_File.user_id IS NOT NULL 
+AND subscription_type = 'trial')
+WHERE user_trial_row = 1),
+
+Subscriber_user_info AS (
+SELECT *
+FROM (
+SELECT Combined_File.user_id, 
+       src_subscription_id AS sub_subscription_id,
+       start_timestamp as sub_start_time, 
+       end_timestamp as sub_end_time,
+       subscription_canceled_at as sub_cancel_time, 
+       ROW_NUMBER() OVER (PARTITION BY Combined_File.user_id ORDER BY start_timestamp DESC) AS user_sub_row,
+       CASE WHEN start_timestamp >= CAST('2023-05-19' AS DATE) THEN 1 ELSE 0 END AS sub_within_exp_range
+FROM Combined_File
+LEFT JOIN analytics_reporting.subscriptions ON Combined_File.user_id = analytics_reporting.subscriptions.user_id 
+WHERE Combined_File.user_id IS NOT NULL 
+AND subscription_type = 'subscribed')
+WHERE user_sub_row = 1),
+
+/* combine trial / subscirber info to table  */
+
+Results_Table AS (
+SELECT Combined_File.*,
+       trial_start_time,
+       trial_end_time,
+       trial_cancel_time,
+       trial_within_exp_range,
+       sub_start_time,
+       sub_end_time,
+       sub_cancel_time,
+       sub_within_exp_range
+FROM Combined_File 
+LEFT JOIN Trial_user_info ON Trial_user_info.user_id = Combined_File.user_id 
+LEFT JOIN Subscriber_user_info ON Subscriber_user_info.user_id = Combined_File.user_id)
+
+/* Mark the status of the user - use condition to also mark if we can report on tiral / subscriptions for that user */
+
+
+SELECT *, CASE WHEN user_status IN ('Return Visitor - With Account', 'Fresh Visitor') THEN 1 ELSE 0 END AS part_of_exp
+FROM (
+select Results_Table.*, registration_time,
+       CASE WHEN organisation_id IS NOT NULL THEN 'B2B User'
+            WHEN sub_within_exp_range = 0 AND sub_end_time >= CAST('2023-05-20' AS DATE) THEN 'Return Visitor - Active Subscription'
+            WHEN sub_within_exp_range = 0 AND sub_end_time <= CAST('2023-05-20' AS DATE) THEN 'Return Visitor - Expired Subscription'
+            WHEN trial_within_exp_range = 0 AND sub_end_time IS NULL THEN 'Return Visitor - Trial User'
+            WHEN sub_within_exp_range IS NULL AND registration_time < CAST('2023-05-12' AS DATE) THEN 'Return Visitor - With Account' 
+            WHEN registration_time >= CAST('2023-05-12' AS DATE) OR registration_time IS NULL THEN 'Fresh Visitor' ELSE NULL END AS user_status
+from Results_Table
+LEFT JOIN analytics_reporting.user_registrations ON analytics_reporting.user_registrations.user_id = Results_Table.user_id)
+
+
+
+
+
+
