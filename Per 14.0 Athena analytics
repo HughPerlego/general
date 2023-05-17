@@ -1,3 +1,51 @@
+CREATE EXTERNAL TABLE IF NOT EXISTS `reference_tables`.`optimizely_visitors_data` (
+  `uuid` varchar(300),
+  `record_timestamp` timestamp,
+  `visitor_id` varchar(300),
+  `experiment_id` varchar(300),
+  `variation_id` varchar(300)
+)
+				
+ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe' 
+WITH SERDEPROPERTIES (
+  'serialization.format' = ',',
+  'field.delim' = ','
+) LOCATION 's3://perlego-s3-reference-tb/csv_files/optimizely_visitors/'
+TBLPROPERTIES ('has_encrypted_data'='false');
+
+-- Creates the actual folder on S3
+CREATE EXTERNAL TABLE IF NOT EXISTS reference_tables.optimizely_visitors (
+  uuid varchar(300),
+  record_timestamp timestamp,
+  visitor_id varchar(300),
+  experiment_id varchar(300),
+  variation_id varchar(300)
+)
+LOCATION 's3://perlego-s3-reference-tb/reference_tables/optimizely_visitors/'
+TBLPROPERTIES ('has_encrypted_data'='false');
+
+-- Seeds the folder using the table containing CSV data 
+INSERT into "reference_tables"."optimizely_visitors" (
+  uuid,
+  record_timestamp,
+  visitor_id,
+  experiment_id,
+  variation_id
+)
+SELECT *
+FROM "reference_tables"."optimizely_visitors_data";
+
+-- Drops the table containing CSV data.
+DROP TABLE reference_tables.optimizely_visitors_data;
+
+select *
+from optimizely_visitors
+where variation_id is not null 
+
+drop table reference_tables.optimizely_visitors
+
+------------------------
+
 CREATE EXTERNAL TABLE athena_analytics.free_trial_per_14 (
 
 visitor_id varchar(300),
@@ -8,6 +56,7 @@ variation_name varchar(9),
 first_event_time timestamp,
 last_event_time timestamp,
 event_tracking_first_date timestamp,
+geo_location_visitor string,
 vistor_in_event_tracking int,
 vistor_created_account int,
 user_id int,
@@ -46,6 +95,7 @@ variation_name,
 first_event_time,
 last_event_time,
 event_tracking_first_date,
+geo_location_visitor,
 vistor_in_event_tracking,
 vistor_created_account,
 user_id,
@@ -78,13 +128,25 @@ GROUP BY visitor_id, experiment_id, variation_id,
               WHEN variation_id = '24113420093' THEN 'Variation' ELSE NULL END
 ),
 
-/* mark how visitors can be identified  */
+/* mark how visitors can be identified - also record geo location as no geo location in parquet files */
 
 Unique_visitors_identified AS (
-select unique_id, 1 as identified_in_tracking_service, MIN(Record_date) as event_tracking_first_date
+SELECT unique_id, identified_in_tracking_service, event_tracking_first_date, First_USA_Time, First_GB_Time,
+       CASE WHEN First_USA_Time IS NOT NULL AND First_GB_Time IS NULL THEN 'USA'
+            WHEN First_USA_Time IS NULL AND First_GB_Time IS NOT NULL THEN 'UK'
+            WHEN First_USA_Time IS NOT NULL AND First_GB_Time IS NOT NULL 
+            AND First_USA_Time < First_GB_Time THEN 'UK'
+            WHEN First_USA_Time IS NOT NULL AND First_GB_Time IS NOT NULL 
+            AND First_USA_Time >= First_GB_Time THEN 'USA' ELSE 'Unknown' END AS 
+            geo_location_visitor
+FROM (
+select unique_id, 1 as identified_in_tracking_service, Record_date as event_tracking_first_date, 
+       CASE WHEN geo_location = 'US' THEN MIN(record_date) OVER (PARTITION BY unique_id) ELSE NULL END AS First_USA_Time,
+       CASE WHEN geo_location = 'GB' THEN MIN(record_date) OVER (PARTITION BY unique_id) ELSE NULL END AS First_GB_Time,
+       ROW_NUMBER() OVER (PARTITION BY unique_id ORDER BY record_date ASC) as row_rank
 from prod_gold_bucket_database.event_tracking 
-WHERE unique_id IN (SELECT visitor_id FROM Grouped_Optimizely_File)
-GROUP BY unique_id),
+WHERE unique_id IN (SELECT visitor_id FROM Grouped_Optimizely_File))
+WHERE row_rank = 1),
 
 /* find first user id associated with the visitor id  */
 
@@ -108,6 +170,7 @@ SELECT *
 FROM (
 SELECT Grouped_Optimizely_File.*, 
        event_tracking_first_date,
+       geo_location_visitor,
        COALESCE(identified_in_tracking_service, 0) AS vistor_in_event_tracking,
        COALESCE(visitor_created_account, 0) AS vistor_created_account,
        user_id,
@@ -181,8 +244,6 @@ select Results_Table.*, registration_time,
             WHEN registration_time >= CAST('2023-05-12' AS DATE) OR registration_time IS NULL THEN 'Fresh Visitor' ELSE NULL END AS user_status
 from Results_Table
 LEFT JOIN analytics_reporting.user_registrations ON analytics_reporting.user_registrations.user_id = Results_Table.user_id)
-
-
 
 
 
