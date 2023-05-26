@@ -64,11 +64,13 @@ user_id_visitor_order int,
 trial_start_time timestamp,
 trial_end_time timestamp,
 trial_cancel_time timestamp,
+billing_frequency string,
 trial_within_exp_range int,
 sub_start_time timestamp,
 sub_end_time timestamp,
 sub_cancel_time timestamp,
 sub_within_exp_range int,
+total_paid_gbp double,
 registration_time timestamp,
 user_status varchar(37),
 part_of_exp int
@@ -103,11 +105,13 @@ user_id_visitor_order,
 trial_start_time,
 trial_end_time,
 trial_cancel_time,
+billing_frequency,
 trial_within_exp_range,
 sub_start_time,
 sub_end_time,
 sub_cancel_time,
 sub_within_exp_range,
+total_paid_gbp,
 registration_time,
 user_status,
 part_of_exp
@@ -190,6 +194,7 @@ SELECT Combined_File.user_id,
        start_timestamp as trial_start_time, 
        end_timestamp as trial_end_time,
        subscription_canceled_at as trial_cancel_time, 
+       billing_frequency,
        ROW_NUMBER() OVER (PARTITION BY Combined_File.user_id ORDER BY start_timestamp DESC) AS user_trial_row,
        CASE WHEN start_timestamp >= CAST('2023-05-12' AS DATE) THEN 1 ELSE 0 END AS trial_within_exp_range
 FROM Combined_File
@@ -207,7 +212,8 @@ SELECT Combined_File.user_id,
        end_timestamp as sub_end_time,
        subscription_canceled_at as sub_cancel_time, 
        ROW_NUMBER() OVER (PARTITION BY Combined_File.user_id ORDER BY start_timestamp DESC) AS user_sub_row,
-       CASE WHEN start_timestamp >= CAST('2023-05-19' AS DATE) THEN 1 ELSE 0 END AS sub_within_exp_range
+       CASE WHEN start_timestamp >= CAST('2023-05-19' AS DATE) THEN 1 ELSE 0 END AS sub_within_exp_range,
+       total_paid_gbp
 FROM Combined_File
 LEFT JOIN analytics_reporting.subscriptions ON Combined_File.user_id = analytics_reporting.subscriptions.user_id 
 WHERE Combined_File.user_id IS NOT NULL 
@@ -221,11 +227,13 @@ SELECT Combined_File.*,
        trial_start_time,
        trial_end_time,
        trial_cancel_time,
+       billing_frequency,
        trial_within_exp_range,
        sub_start_time,
        sub_end_time,
        sub_cancel_time,
-       sub_within_exp_range
+       sub_within_exp_range,
+       total_paid_gbp
 FROM Combined_File 
 LEFT JOIN Trial_user_info ON Trial_user_info.user_id = Combined_File.user_id 
 LEFT JOIN Subscriber_user_info ON Subscriber_user_info.user_id = Combined_File.user_id)
@@ -245,6 +253,10 @@ select Results_Table.*, registration_time,
 from Results_Table
 LEFT JOIN analytics_reporting.user_registrations ON analytics_reporting.user_registrations.user_id = Results_Table.user_id)
 
+drop table athena_analytics.free_trial_per_14
+
+select *
+from athena_analytics.free_trial_per_14
 
 
 
