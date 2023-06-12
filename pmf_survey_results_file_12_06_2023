@@ -1,0 +1,488 @@
+WITH Subscriber_User_Ids AS (
+    SELECT user_id, 'Current Subscriber' AS Trial_Sub, start_timestamp AS Subscription_Start_Date,
+           end_timestamp as Subscription_End_Date,
+           subscribed_months,
+           sub_category_name,
+           category_name,
+           billing_frequency,
+           payment_channel,
+           row_number() over (partition by user_id order by start_timestamp) as user_row_rank
+    FROM analytics_reporting.subscriptions s
+    WHERE subscription_type = 'subscribed'
+    AND (end_timestamp >= cast('2023-05-19' as date) OR end_timestamp IS NULL)
+    AND (s.payment_channel = 'indirect' OR s.paid_months > 0)
+),
+
+Trial_User_Ids AS (
+SELECT user_id, 'Trial User' AS Trial_Sub,
+       start_timestamp AS Subscription_Start_Date,
+       end_timestamp as Subscription_End_Date,
+       subscribed_months,
+       sub_category_name,
+       category_name,
+       billing_frequency,
+       payment_channel,
+       row_number() over (partition by user_id order by start_timestamp) as user_row_rank
+    FROM analytics_reporting.subscriptions
+    WHERE subscription_type = 'trial'
+    AND start_timestamp >= cast('2023-04-01' as date) and start_timestamp <= cast('2023-05-12' as date)
+    and user_id not in (select user_id from Subscriber_User_Ids where user_id is not null)
+),
+
+Cancelled_subscribers as (
+    SELECT user_id, 'Churned Subscriber' AS Trial_Sub,
+           start_timestamp AS Subscription_Start_Date,
+           end_timestamp as Subscription_End_Date,
+           subscribed_months,
+           sub_category_name,
+           category_name,
+           billing_frequency,
+           payment_channel,
+           row_number() over (partition by user_id order by start_timestamp) as user_row_rank
+    FROM analytics_reporting.subscriptions s
+    WHERE subscription_type = 'subscribed'
+    AND (end_timestamp >= cast('2023-04-01' as date) and  end_timestamp <= cast('2023-05-18' as date))
+    AND (s.payment_channel = 'indirect' OR s.paid_months > 0)
+    and user_id not in (select user_id from Subscriber_User_Ids where user_id is not null)
+),
+
+Combine_UserIds AS (
+    SELECT *
+    FROM Subscriber_User_Ids
+    WHERE user_row_rank = 1
+    UNION
+    SELECT *
+    FROM Trial_User_Ids
+    WHERE user_row_rank = 1
+    UNION
+    SELECT *
+    FROM Cancelled_subscribers
+    WHERE user_row_rank = 1
+    ),
+
+/* Main Data Table */
+Main_Data_Table AS (
+    SELECT Combine_UserIds.user_id, Trial_Sub, acquisition_country, acquisition_region, payment_channel , email, date_joined, industry, role, university, course, last_active, marketing_consent, consent_last_updated, is_deleted, billing_frequency
+    , study_level, academic_institution, user_persona, year_of_graduation,
+    DATE_DIFF('day', last_active,current_date) AS Days_Since_Login, subscribed_months, Subscription_End_Date,
+           Subscription_Start_Date
+    FROM Combine_UserIds
+    LEFT JOIN prod_gold_bucket_database.users ON Combine_UserIds.user_id = prod_gold_bucket_database.users.id
+    LEFT JOIN analytics_reporting.user_registrations ON analytics_reporting.user_registrations.user_id = Combine_UserIds.user_id
+    WHERE internal_user = 'N'
+    ),
+
+/* Books Opened */
+
+Reading_Sub_First_30_Days AS (
+SELECT Main_Data_Table.user_id, COUNT(*) Books_Open_First_30_Sub_Days, SUM(reading_duration_minutes) AS Total_Mins_Read_First_30_Days
+FROM Main_Data_Table
+INNER JOIN analytics_reporting.reading_activity_daily ON Main_Data_Table.user_id = analytics_reporting.reading_activity_daily.user_id
+WHERE CAST(Subscription_Start_Date as date) >= reading_date AND reading_date <= date_add('day', 30, CAST(Subscription_Start_Date as date))
+GROUP BY Main_Data_Table.user_id),
+
+Books_Opened_30_Days AS (
+SELECT user_id, COUNT(*) AS Books_Open_30_day, SUM(reading_duration_minutes) AS Total_Mins_Read_30_Days
+    FROM analytics_reporting.reading_activity_daily
+    WHERE user_id IN (SELECT user_id FROM Main_Data_Table)
+    AND DATE_DIFF('day', reading_date, cast('2023-05-19' as date)) <= 30
+    GROUP BY user_id
+    ),
+
+Books_Opened_90_Days AS (
+SELECT user_id, COUNT(*) AS Books_Open_90_day, SUM(reading_duration_minutes) AS Total_Mins_Read_90_Days
+    FROM analytics_reporting.reading_activity_daily
+    WHERE user_id IN (SELECT user_id FROM Main_Data_Table)
+    AND DATE_DIFF('day', reading_date, CAST('2023-05-19' as date)) <= 90
+    GROUP BY user_id
+    ),
+
+ Main_Table_Books_Opened AS (
+SELECT Main_Data_Table.*, 
+      Books_Open_30_day, 
+      Books_Open_90_day, 
+      Books_Open_First_30_Sub_Days, 
+      Total_Mins_Read_30_Days, 
+      Total_Mins_Read_90_Days, 
+      Total_Mins_Read_First_30_Days
+FROM Main_Data_Table
+LEFT JOIN Books_Opened_30_Days ON Books_Opened_30_Days.user_id = Main_Data_Table.user_id
+LEFT JOIN Books_Opened_90_Days ON Books_Opened_90_Days.user_id = Main_Data_Table.user_id
+LEFT JOIN Reading_Sub_First_30_Days ON Reading_Sub_First_30_Days.user_id = Main_Data_Table.user_id),
+
+/* In book events */
+
+Book_events_first_30days AS (
+    SELECT Main_Table_Books_Opened.user_id, count(*) AS In_Book_Events_First_30day
+    FROM Main_Table_Books_Opened
+    INNER JOIN analytics_reporting.user_tracking_events ON Main_Table_Books_Opened.user_id = analytics_reporting.user_tracking_events.user_id
+    WHERE event_name in ('open Book', 'highlight clicked', 'create highlight', 
+                       'annotation created', 'annotation navigation',
+                         'reference copied to clipboard - APA7', 'Reference copied to clipboard - HARVARD',
+                         'reference copied to clipboard - VANCOUVER', 'book shared', 'bookmark created',
+                             'book favourite added', 'create bookmark', 'font size change', 'change font size', 'find in book tab opening',
+                             'highlight creation', 'keyword navigation', 'copy text', 'keyword search', 'bookmark creation', 'book reference copied', 'cite passage', 'tts audio started', 'timer play')
+    AND Subscription_Start_Date >= event_timestamp AND event_timestamp <= date_add('day', 30, Subscription_Start_Date)
+    GROUP BY Main_Table_Books_Opened.user_id
+),
+
+Book_events_30_90_days AS (
+    SELECT user_id, 
+           count(CASE WHEN date_diff('day', event_timestamp, cast('2023-05-19' as date)) <= 30 THEN user_event_id ELSE NULL END) AS In_Book_Events_30_day,
+           count(CASE WHEN date_diff('day', event_timestamp, cast('2023-05-19' as date)) <= 90 THEN user_event_id ELSE NULL END) AS In_Book_Events_90_day
+    FROM analytics_reporting.user_tracking_events
+    WHERE user_id in (select user_id from Main_Table_Books_Opened)
+    AND event_name in ('open Book', 'highlight clicked', 'create highlight', 
+                       'annotation created', 'annotation navigation',
+                         'reference copied to clipboard - APA7', 'Reference copied to clipboard - HARVARD',
+                         'reference copied to clipboard - VANCOUVER', 'book shared', 'bookmark created',
+                             'book favourite added', 'create bookmark', 'font size change', 'change font size', 'find in book tab opening',
+                             'highlight creation', 'keyword navigation', 'copy text', 'keyword search', 'bookmark creation', 'book reference copied', 'cite passage', 'tts audio started', 'timer play')
+    AND date_diff('day', event_timestamp, cast('2023-05-19' as date)) <= 90
+    GROUP BY user_id
+)
+
+SELECT user_id,
+       "Subscriber Description",
+       "Subscriber Type",
+       "Months Subscribed",
+       "Subscription Start Date",
+       "Subscription End Date",
+       "Country",
+       "Region",
+       "Count of engagement activity (books opened) in their first month of subscription",
+       "Count of engagement activity (books opened) in previous 30 days from 19th May",
+       "Count of engagement activity (books opened) in previous 90 days from 19th May",
+       "Count of engagement activity (In Book Events) in their first month of subscription",
+       "Count of engagement activity (In Book Events) in previous 30 days from 19th May",
+       "Count of engagement activity (In Book Events) in previous 90 days from 19th May",
+       "Sum of reading minutes in first 30 days of subscription",
+       "Sum of reading minutes in previous 30 days from 19th May",
+       "Sum of reading minutes in previous 90 days from 19th May",
+       "Count of days since last reading session from 19th May",
+       user_persona,
+       study_level,
+       academic_institution,
+       year_of_graduation
+
+FROM (
+SELECT Main_Table_Books_Opened.user_id, 
+       Trial_Sub AS "Subscriber Description",
+       CASE WHEN payment_channel = 'direct' AND billing_frequency = 'month' THEN 'B2C - Monthly'
+            WHEN payment_channel = 'direct' AND billing_frequency = 'year' THEN 'B2C - Annual'
+            WHEN payment_channel = 'indirect' THEN 'B2B'
+            ELSE NULL END AS "Subscriber Type",
+       subscribed_months AS "Months Subscribed",
+       Subscription_Start_Date AS "Subscription Start Date",
+       Subscription_End_Date AS "Subscription End Date",
+       acquisition_country AS "Country", 
+       acquisition_region AS "Region",
+       COALESCE(Books_Open_First_30_Sub_Days, 0) AS "Count of engagement activity (books opened) in their first month of subscription",
+       COALESCE(Books_Open_30_day, 0) AS "Count of engagement activity (books opened) in previous 30 days from 19th May",
+       COALESCE(Books_Open_90_day, 0) AS "Count of engagement activity (books opened) in previous 90 days from 19th May",
+       
+       COALESCE(In_Book_Events_First_30day, 0) AS "Count of engagement activity (In Book Events) in their first month of subscription",
+       COALESCE(In_Book_Events_30_day,0) AS "Count of engagement activity (In Book Events) in previous 30 days from 19th May",
+       COALESCE(In_Book_Events_90_day,0) AS "Count of engagement activity (In Book Events) in previous 90 days from 19th May",
+       
+       COALESCE(ROUND(Total_Mins_Read_First_30_Days, 2), 0) AS "Sum of reading minutes in first 30 days of subscription",
+       COALESCE(ROUND(Total_Mins_Read_30_Days, 2),0) AS "Sum of reading minutes in previous 30 days from 19th May",
+       COALESCE(ROUND(Total_Mins_Read_90_Days, 2),0) AS "Sum of reading minutes in previous 90 days from 19th May",
+       
+       Days_Since_Login AS "Count of days since last reading session from 19th May",
+       user_persona,
+       study_level,
+       academic_institution,
+       year_of_graduation,
+       ROW_NUMBER() OVER (PARTITION BY email ORDER BY Subscription_Start_Date ASC) as email_row_rank
+FROM Main_Table_Books_Opened
+LEFT JOIN Book_events_30_90_days ON Book_events_30_90_days.user_id = Main_Table_Books_Opened.user_id
+LEFT JOIN Book_events_first_30days ON Book_events_first_30days.user_id = Main_Table_Books_Opened.user_id
+WHERE (email NOT LIKE '%Perlego%' and email is not null and is_deleted = false)
+) WHERE user_id not in (1298137,
+ 1370781,
+ 1403701,
+ 265673,
+ 298491,
+ 309332,
+ 328116,
+ 460055,
+ 611175,
+ 847841,
+ 952037,
+067132,
+1004443,
+1017695,
+1020522,
+1021274,
+1024239,
+1024918,
+1028295,
+1028789,
+1029254,
+103174,
+1033305,
+1034062,
+103435,
+1038116,
+1040998,
+1042153,
+1043814,
+1044439,
+1045468,
+104752,
+1047582,
+1048846,
+105014,
+105286,
+1056317,
+1056899,
+1069276,
+1070591,
+1071750,
+1076645,
+1080513,
+1080581,
+1082271,
+1084401,
+1085606,
+1086741,
+1090403,
+1091099,
+1091241,
+1095501,
+1103244,
+1108088,
+1113707,
+1113891,
+1114575,
+1120665,
+1120793,
+1120821,
+1121553,
+1122862,
+1128063,
+1128156,
+1137828,
+1139854,
+1140305,
+1142100,
+1144453,
+1145561,
+1150544,
+1151724,
+1152823,
+1160764,
+1162297,
+1172590,
+1182605,
+1183220,
+1186142,
+1197503,
+1197889,
+1200167,
+1201388,
+1203477,
+1213244,
+1213655,
+1218105,
+1220786,
+1221697,
+1224632,
+1226290,
+1231768,
+1234935,
+1237353,
+1245614,
+1245938,
+1247055,
+1252979,
+1260708,
+1263969,
+1264881,
+1266663,
+126681,
+1274890,
+1276987,
+1277577,
+1283560,
+1286477,
+1288471,
+1289364,
+1291746,
+1297463,
+1297656,
+1302362,
+1306634,
+1312795,
+1312829,
+1314477,
+1321574,
+1335679,
+1336879,
+134933,
+1354530,
+1358824,
+1358844,
+1359418,
+1363755,
+1374945,
+1386624,
+1394594,
+1400704,
+1401244,
+1406886,
+1407734,
+1410620,
+1432772,
+1437303,
+1443455,
+1459556,
+1461006,
+1461504,
+1464087,
+1464504,
+1476236,
+1477010,
+1517941,
+1524937,
+153714,
+1560169,
+1563966,
+1569014,
+161907,
+1657808,
+1659683,
+1679662,
+1747235,
+1758016,
+1769519,
+177168,
+1777187,
+177869,
+177919,
+1783494,
+179080,
+179750,
+180567,
+1813148,
+1830328,
+1831726,
+1847766,
+18693078,
+1870005,
+1873521,
+18777096,
+18872648,
+18896716 ,
+18915788,
+18987738,
+1906762,
+193369,
+194406,
+231659,
+25428,
+254957,
+260201,
+26146,
+26394,
+265470,
+28705,
+289793,
+298921,
+306273,
+313544,
+313607,
+316619,
+316918,
+329228,
+338365,
+362983,
+363193,
+372495,
+373897,
+390358,
+396485,
+412567,
+414233,
+414343,
+414714,
+422795,
+425073,
+430508,
+43676,
+492299,
+507995,
+519296,
+521390,
+531471,
+534861,
+54031,
+571494,
+577289,
+577853,
+578133,
+586026,
+591479,
+608329,
+613256,
+615797,
+619123,
+624048,
+627503,
+631066,
+631366,
+633896,
+657279,
+663190,
+674781,
+687266,
+693208,
+694774,
+696923,
+702641,
+703514,
+704185,
+709454,
+713215,
+720385,
+723170,
+743858,
+750118,
+752839,
+764047,
+789460,
+801743,
+811857,
+817099,
+832939,
+83351,
+837059,
+845924,
+855677,
+882773,
+899875,
+906307,
+906765,
+907142,
+909581,
+913893,
+91424,
+918695,
+924200,
+927924,
+930878,
+935107,
+938597 ,
+940608,
+940748,
+942633,
+945785,
+963409,
+966158,
+967472,
+993603,
+695518)
+        AND email_row_rank = 1
+        limit 500
+        
