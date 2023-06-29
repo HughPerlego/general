@@ -1,0 +1,131 @@
+/* Pull out control & test subscriptions after start date for experinment - mark users based on stripe plan */
+WITH Subscriptions_Base_Table AS (
+
+SELECT user_id, src_subscription_id, stripe_customer_id, src_sub_category_id, payment_channel,
+       user_region, Experiment_Group, Plan_Details
+FROM (
+SELECT user_id, src_subscription_id, stripe_customer_id, src_sub_category_id, payment_channel,         user_region,
+       
+       CASE WHEN src_sub_category_id IN ('price_1NDmuULmu5QiBx4B5hM9WZDJ',
+                                         'price_1NDmshLmu5QiBx4BbOeGG4aU',
+                                         'price_1NDmqMLmu5QiBx4BubTllr4j',
+                                         'price_1NDmmHLmu5QiBx4BktSh62YL') 
+                                         THEN 'Variation' ELSE 'Control' END AS Experiment_Group,
+        
+        CASE WHEN  src_sub_category_id IN ('price_1NDmuULmu5QiBx4B5hM9WZDJ',                                                       'price_1KTOPmLmu5QiBx4Bwnge2GIQ') THEN 'Yearly - US'
+             WHEN  src_sub_category_id IN ('price_1NDmqMLmu5QiBx4BubTllr4j',                                                  'price_1Kt9EZLmu5QiBx4Bgk7I2HLw') THEN 'Yearly - UK'
+             
+             WHEN  src_sub_category_id IN ('price_1NDmshLmu5QiBx4BbOeGG4aU',                                                  'price_1KTOQGLmu5QiBx4BFiRo8kdY') THEN 'Monthly - US'
+             WHEN  src_sub_category_id IN ('price_1NDmmHLmu5QiBx4BktSh62YL',                                                  'price_1Kt9FWLmu5QiBx4BFLFLFzPc') THEN 'Monthly - UK'      ELSE 'Unknown' END AS Plan_Details 
+FROM analytics_reporting.subscriptions 
+WHERE src_sub_category_id IN ('price_1NDmuULmu5QiBx4B5hM9WZDJ',
+                              'price_1NDmshLmu5QiBx4BbOeGG4aU',
+                              'price_1NDmqMLmu5QiBx4BubTllr4j',
+                              'price_1NDmmHLmu5QiBx4BktSh62YL',
+                              'price_1KTOPmLmu5QiBx4Bwnge2GIQ',
+                              'price_1KTOQGLmu5QiBx4BFiRo8kdY',
+                              'price_1Kt9EZLmu5QiBx4Bgk7I2HLw',
+                              'price_1Kt9FWLmu5QiBx4BFLFLFzPc')
+AND start_timestamp >= CAST('2023-06-29' AS DATE)
+)
+GROUP BY user_id, src_subscription_id, stripe_customer_id, src_sub_category_id, payment_channel,
+         user_region, Experiment_Group, Plan_Details
+),
+
+/* Add in subscription dates for trial and subscribed (all included to double check subscriptions imported)  */
+
+
+Subscription_Dates AS (
+
+SELECT user_id, src_subscription_id, 
+       MAX(CASE WHEN subscription_type = 'trial' THEN start_timestamp ELSE NULL END) AS Trial_Start_Date,
+       MAX(CASE WHEN subscription_type = 'trial' THEN end_timestamp ELSE NULL END) AS Trial_End_Date,
+       MAX(CASE WHEN subscription_type = 'trial' THEN subscription_canceled_at ELSE NULL END) AS Trial_Cancel_Date,
+       
+       MAX(CASE WHEN subscription_type = 'subscription' THEN start_timestamp ELSE NULL END) AS Sub_Start_Date,
+       MAX(CASE WHEN subscription_type = 'subscription' THEN end_timestamp ELSE NULL END) AS Sub_End_Date,
+       MAX(CASE WHEN subscription_type = 'subscription' THEN subscription_canceled_at ELSE NULL END) AS Sub_Cancel_Date
+FROM analytics_reporting.subscriptions 
+WHERE user_id IN (SELECT user_id FROM Subscriptions_Base_Table)
+GROUP BY user_id, src_subscription_id),
+
+/* Combine base table and main subscription table */
+
+Combined_Date_Table AS (
+SELECT Subscriptions_Base_Table.*,
+       Trial_Start_Date,
+       Trial_End_Date,
+       Trial_Cancel_Date,
+       Sub_Start_Date,
+       Sub_End_Date,
+       Sub_Cancel_Date,
+       CASE WHEN Experiment_Group = 'Control' THEN Trial_Start_Date ELSE Sub_Start_Date END AS Plan_Start_Date,
+       CASE WHEN Experiment_Group = 'Control' THEN Trial_Cancel_Date ELSE Sub_Cancel_Date END AS Plan_Cancel_Date
+FROM Subscriptions_Base_Table
+LEFT JOIN Subscription_Dates ON (Subscription_Dates.user_id = Subscriptions_Base_Table.user_id AND 
+                                 Subscription_Dates.src_subscription_id = Subscriptions_Base_Table.src_subscription_id)
+),
+
+/* look at payments for each subscription - join to invoices and charges for subscriptions in the main table - also get gbp abmount - aggregate results to subscription level recording payments and refunds issued - join exchange rates on one lagged day so that we can see paid amounts for the most recent day - as more intrested in initally trakcing whether the payment has gone through  */
+
+Subscription_Charges AS (
+SELECT subscription_id, 
+       COUNT(DISTINCT(invoice_id)) as invoices,
+       COUNT(*) as charges,
+       COUNT(CASE WHEN paid =True THEN paid ELSE NULL END) AS paid_charges,
+       SUM(gbp_amount) as gbp_amount,
+       COUNT(CASE WHEN paid = False THEN paid ELSE NULL END) AS failed_charges,
+       MAX(CASE WHEN paid = False THEN created ELSE NULL END) AS last_failed_charge_date,
+       COUNT(CASE WHEN captured = True THEN captured ELSE NULL END) AS captured_charges,
+       COUNT(CASE WHEN refunded = True THEN refunded ELSE NULL END) AS refunded_charges,
+       SUM(gbp_refund_amount) as gbp_refund_amount
+       
+FROM (                                 
+SELECT ili.subscription_id, rc.currency, rc.amount, rc.paid, rc.captured, rc.refunded, 
+       rc.amount_refunded, refund_created, refund_reason, rc.created, ili.invoice_id, 
+       CASE WHEN rc.currency = 'gbp' THEN 1.0*amount / 100 
+            ELSE 1.0*((amount / rate) / 100) END AS gbp_amount,
+       CASE WHEN rc.currency = 'gbp' THEN 1.0*amount_refunded / 100 
+            ELSE 1.0*((amount_refunded / rate) / 100) END AS gbp_refund_amount
+ FROM prod_gold_bucket_database.invoices AS i
+    LEFT JOIN prod_gold_bucket_database.charges AS rc ON i.id = rc.invoice
+    LEFT JOIN reporting_layer.view_exchange_rates_daily as ex ON 
+    (lower(ex.currency) =  lower(rc.currency) AND 
+    cast(ex.rate_date as date) =  date_add('day', -1, CAST(rc.created as date)))
+    INNER JOIN prod_gold_bucket_database.invoice_line_items AS ili ON i.id = ili.invoice_id
+    AND ili.type = 'subscription' 
+WHERE ili.subscription_id IN (SELECT src_subscription_id FROM Combined_Date_Table)
+      AND rc.amount > 0
+) GROUP BY subscription_id),
+
+/* look at disputes per subscription */
+
+Disputes_grouped AS (
+SELECT subscription_id, 
+       COUNT(DISTINCT(dispute_id)) AS Disputes,
+       MIN(dispute_created_time) AS First_Dispute_Time,
+       MAX(dispute_created_time) AS Last_Dispute_Time
+FROM prod_gold_bucket_database.disputes 
+WHERE subscription_id IN (SELECT src_subscription_id FROM Combined_Date_Table)
+GROUP BY subscription_id)
+
+
+/* combine charges & disputes tables */
+
+SELECT Combined_Date_Table.*, 
+       invoices,
+       charges,
+       paid_charges,
+       gbp_amount,
+       failed_charges,
+       last_failed_charge_date,
+       captured_charges,
+       refunded_charges,
+       Disputes,
+       First_Dispute_Time,
+       Last_Dispute_Time
+FROM Combined_Date_Table
+LEFT JOIN Subscription_Charges ON Subscription_Charges.subscription_id = Combined_Date_Table.src_subscription_id
+LEFT JOIN Disputes_grouped ON Disputes_grouped.subscription_id = Combined_Date_Table.src_subscription_id
+
+
