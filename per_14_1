@@ -1,3 +1,76 @@
+CREATE EXTERNAL TABLE athena_analytics.hw_per_14_1 (
+
+user_id int,
+src_subscription_id string,
+stripe_customer_id string,
+src_sub_category_id string,
+payment_channel string,
+user_region string,
+Experiment_Group string,
+Plan_Details string,
+Trial_Start_Date timestamp,
+Trial_End_Date timestamp,
+Trial_Cancel_Date timestamp,
+Sub_Start_Date timestamp,
+Sub_End_Date timestamp,
+Sub_Cancel_Date timestamp,
+Plan_Start_Date timestamp,
+Plan_Cancel_Date timestamp,
+invoices bigint,
+charges bigint,
+paid_charges bigint,
+gbp_amount double, 
+gbp_refund_amount double,
+failed_charges bigint,
+last_failed_charge_date timestamp,
+captured_charges bigint,
+refunded_charges bigint,
+Disputes bigint,
+First_Dispute_Time timestamp,
+Last_Dispute_Time timestamp
+)
+
+LOCATION 's3://perlego-s3-reference-tb/athena_analytics/hw_per_14_1/'
+TBLPROPERTIES ('has_encrypted_data'='false');
+
+
+/* 
+https://s3.console.aws.amazon.com/s3/buckets/perlego-s3-reference-tb?region=eu-west-2&prefix=athena_analytics/free_trial_remove_exp/&showversions=false
+*/
+
+INSERT INTO athena_analytics.hw_per_14_1 (
+
+user_id,
+src_subscription_id,
+stripe_customer_id,
+src_sub_category_id,
+payment_channel,
+user_region,
+Experiment_Group,
+Plan_Details,
+Trial_Start_Date,
+Trial_End_Date,
+Trial_Cancel_Date,
+Sub_Start_Date,
+Sub_End_Date,
+Sub_Cancel_Date,
+Plan_Start_Date,
+Plan_Cancel_Date,
+invoices,
+charges,
+paid_charges,
+gbp_amount, 
+gbp_refund_amount,
+failed_charges,
+last_failed_charge_date,
+captured_charges,
+refunded_charges,
+Disputes,
+First_Dispute_Time,
+Last_Dispute_Time
+)
+
+
 /* Pull out control & test subscriptions after start date for experinment - mark users based on stripe plan */
 WITH Subscriptions_Base_Table AS (
 
@@ -16,7 +89,7 @@ SELECT user_id, src_subscription_id, stripe_customer_id, src_sub_category_id, pa
              WHEN  src_sub_category_id IN ('price_1NDmqMLmu5QiBx4BubTllr4j',                                                  'price_1Kt9EZLmu5QiBx4Bgk7I2HLw') THEN 'Yearly - UK'
              
              WHEN  src_sub_category_id IN ('price_1NDmshLmu5QiBx4BbOeGG4aU',                                                  'price_1KTOQGLmu5QiBx4BFiRo8kdY') THEN 'Monthly - US'
-             WHEN  src_sub_category_id IN ('price_1NDmmHLmu5QiBx4BktSh62YL',                                                  'price_1Kt9FWLmu5QiBx4BFLFLFzPc') THEN 'Monthly - UK'      ELSE 'Unknown' END AS Plan_Details 
+             WHEN  src_sub_category_id IN ('price_1Kt9FWLmu5QiBx4BFLFLFzPc',                                                 'price_1NDmmHLmu5QiBx4BktSh62YL') THEN 'Monthly - UK'      ELSE 'Unknown' END AS Plan_Details 
 FROM analytics_reporting.subscriptions 
 WHERE src_sub_category_id IN ('price_1NDmuULmu5QiBx4B5hM9WZDJ',
                               'price_1NDmshLmu5QiBx4BbOeGG4aU',
@@ -42,9 +115,9 @@ SELECT user_id, src_subscription_id,
        MAX(CASE WHEN subscription_type = 'trial' THEN end_timestamp ELSE NULL END) AS Trial_End_Date,
        MAX(CASE WHEN subscription_type = 'trial' THEN subscription_canceled_at ELSE NULL END) AS Trial_Cancel_Date,
        
-       MAX(CASE WHEN subscription_type = 'subscription' THEN start_timestamp ELSE NULL END) AS Sub_Start_Date,
-       MAX(CASE WHEN subscription_type = 'subscription' THEN end_timestamp ELSE NULL END) AS Sub_End_Date,
-       MAX(CASE WHEN subscription_type = 'subscription' THEN subscription_canceled_at ELSE NULL END) AS Sub_Cancel_Date
+       MAX(CASE WHEN subscription_type = 'subscribed' THEN start_timestamp ELSE NULL END) AS Sub_Start_Date,
+       MAX(CASE WHEN subscription_type = 'subscribed' THEN end_timestamp ELSE NULL END) AS Sub_End_Date,
+       MAX(CASE WHEN subscription_type = 'subscribed' THEN subscription_canceled_at ELSE NULL END) AS Sub_Cancel_Date
 FROM analytics_reporting.subscriptions 
 WHERE user_id IN (SELECT user_id FROM Subscriptions_Base_Table)
 GROUP BY user_id, src_subscription_id),
@@ -110,13 +183,14 @@ WHERE subscription_id IN (SELECT src_subscription_id FROM Combined_Date_Table)
 GROUP BY subscription_id)
 
 
-/* combine charges & disputes tables */
+/* combine charges & disputes tables - also filter to users who only signed up after the experinment had begun*/
 
 SELECT Combined_Date_Table.*, 
        invoices,
        charges,
        paid_charges,
        gbp_amount,
+       gbp_refund_amount,
        failed_charges,
        last_failed_charge_date,
        captured_charges,
@@ -127,5 +201,10 @@ SELECT Combined_Date_Table.*,
 FROM Combined_Date_Table
 LEFT JOIN Subscription_Charges ON Subscription_Charges.subscription_id = Combined_Date_Table.src_subscription_id
 LEFT JOIN Disputes_grouped ON Disputes_grouped.subscription_id = Combined_Date_Table.src_subscription_id
+WHERE Plan_Start_Date >= CAST('2023-06-29 14:00:00' as timestamp)
+
+
+
+
 
 
