@@ -1,0 +1,385 @@
+create external table athena_analytics.hw_top_100 (
+book_id int,
+book_title varchar(300),
+publisher varchar(300),
+subject varchar(300),
+sum_of_reading_minutes double,
+unique_users int)
+
+LOCATION 's3://perlego-s3-reference-tb/athena_analytics/hw_top_100/'
+TBLPROPERTIES ('has_encrypted_data'='false');
+
+insert into athena_analytics.hw_top_100 values 
+
+
+drop table athena_analytics.hw_top_100
+
+drop table athena_analytics.hw_wiley_top_100
+
+create external table athena_analytics.hw_wiley_top_100 (
+perlego_book_id int,
+isbn varchar(300),
+author varchar(300),
+full_title varchar(300),
+status varchar(300),
+in_store_date_clean varchar(300),
+subject varchar(300),
+primary_market varchar(300),
+global_sales_rank int,
+na_sales_rank int,
+na_percent_of_sales double,
+row_sales_rank int,
+row_percent_of_sales double,
+book_restrictions varchar(300),
+available_countries int,
+usa_sales_rights int
+)
+
+LOCATION 's3://perlego-s3-reference-tb/athena_analytics/hw_wiley_top_100/'
+TBLPROPERTIES ('has_encrypted_data'='false');
+
+insert into athena_analytics.hw_wiley_top_100 values 
+
+--------------------
+
+/* Create single table to compare reading stats from mid feb 2023 onwards */
+
+WITH Combined_Book_Table AS (
+SELECT *
+FROM (
+SELECT book_id, 'Benchamrk' AS Book_Group
+FROM athena_analytics.hw_top_100)
+UNION ALL
+SELECT *
+FROM (
+SELECT perlego_book_id AS book_id, 'Wiley' AS Book_Group
+FROM athena_analytics.hw_wiley_top_100)),
+
+/* collect basic reading stats for each group from 20th feb - 20th June  */
+
+Book_Reading_Activity AS (
+SELECT book_id, 
+       COUNT(*) AS Books_Opened,
+       COUNT(DISTINCT(analytics_reporting.reading_activity_daily.user_id)) AS Unique_Users, 
+       SUM(Reading_duration_minutes) AS Mins_Read,
+       
+       COUNT(CASE WHEN payment_channel_crude = 'indirect' THEN book_id ELSE NULL END) AS Books_Opened_B2B_Users,
+       COUNT(DISTINCT(CASE WHEN payment_channel_crude = 'indirect' THEN analytics_reporting.reading_activity_daily.user_id ELSE NULL END)) AS Unique_Users_B2B_Users, 
+       ROUND(SUM(CASE WHEN payment_channel_crude = 'indirect' THEN reading_duration_minutes ELSE NULL END), 2) AS Mins_Read_B2B_Users,
+       
+       COUNT(CASE WHEN payment_channel_crude = 'direct' THEN book_id ELSE NULL END) AS Books_Opened_D2C_Users,
+       COUNT(DISTINCT(CASE WHEN payment_channel_crude = 'direct' THEN analytics_reporting.reading_activity_daily.user_id ELSE NULL END)) AS Unique_Users_D2C_Users, 
+       ROUND(SUM(CASE WHEN payment_channel_crude = 'direct' THEN reading_duration_minutes ELSE NULL END), 2) AS Mins_Read_D2C_Users
+       
+FROM analytics_reporting.reading_activity_daily 
+LEFT JOIN analytics_reporting.user_registrations ON analytics_reporting.user_registrations.user_id = analytics_reporting.reading_activity_daily.user_id
+WHERE book_id IN (SELECT book_id FROM Combined_Book_Table)
+AND reading_date >= CAST('2023-02-21' AS DATE) AND reading_date <= CAST('2023-06-21' AS DATE)
+GROUP BY book_id),
+
+/* include book views as a rough comparison to see if lower open rate is due to lower traffic levels  */
+
+Book_Views_Estimate AS (
+SELECT book_id, 
+       COUNT(CASE WHEN user_id is null THEN book_id ELSE NULL END) AS logged_out_traffic,
+       COUNT(CASE WHEN user_id is not null THEN book_id ELSE NULL END) AS logged_in_traffic
+FROM reporting_layer.view_books 
+LEFT JOIN prod_gold_bucket_database.event_tracking ON prod_gold_bucket_database.event_tracking.current_url = reporting_layer.view_books.book_public_url
+WHERE book_id IN (SELECT book_id FROM Combined_Book_Table)
+AND record_date >= cast('2023-02-21' AS DATE) AND record_date <= cast('2023-06-21' AS DATE)
+GROUP BY book_id
+),
+
+/* user signups  */
+User_signups AS (
+SELECT referrer_book, 
+       COUNT(DISTINCT(user_id)) AS Referred_Users,
+       COUNT(DISTINCT(CASE WHEN converted_trial = 'Y' and payment_channel_crude = 'direct' THEN user_id ELSE NULL END)) AS D2C_trail_users,
+       COUNT(DISTINCT(CASE WHEN converted_subscribed = 'Y' and payment_channel_crude = 'direct' THEN user_id ELSE NULL END)) AS D2C_subscribed_users,
+       COUNT(DISTINCT(CASE WHEN currently_subscribed = 'Y' and payment_channel_crude = 'direct' THEN user_id ELSE NULL END)) AS D2C_currently_subscribed_users
+FROM analytics_reporting.user_registrations 
+WHERE referrer_book in (SELECT book_id FROM Combined_Book_Table)
+AND registration_time >= CAST('2023-02-21' as date) and  registration_time <= CAST('2023-06-21' as date)
+GROUP BY referrer_book)
+
+/* Combined Results - remove books where activated date is before 21st february 2023*/
+
+SELECT Combined_Book_Table.*,
+       date_activated,
+       subject_name,
+       topics,
+       COALESCE(Books_Opened, 0) Books_Opened,
+       COALESCE(Unique_Users, 0) Unique_Users,
+       COALESCE(Mins_Read, 0) Mins_Read,
+       COALESCE(Books_Opened_B2B_Users, 0) Books_Opened_B2B_Users,
+       COALESCE(Unique_Users_B2B_Users, 0) Unique_Users_B2B_Users,
+       COALESCE(Mins_Read_B2B_Users, 0) Mins_Read_B2B_Users,
+       COALESCE(Books_Opened_D2C_Users, 0) Books_Opened_D2C_Users, 
+       COALESCE(Unique_Users_D2C_Users, 0) Unique_Users_D2C_Users,
+       COALESCE(Mins_Read_D2C_Users, 0) Mins_Read_D2C_Users,
+       COALESCE(logged_out_traffic, 0) logged_out_traffic,
+       COALESCE(logged_in_traffic, 0) logged_in_traffic,
+       COALESCE(Referred_Users, 0) Referred_Users,
+       COALESCE(D2C_trail_users, 0) D2C_trail_users,
+       COALESCE(D2C_subscribed_users, 0) D2C_subscribed_users,
+       COALESCE(D2C_currently_subscribed_users, 0) D2C_currently_subscribed_users
+FROM Combined_Book_Table
+LEFT JOIN Book_Reading_Activity ON Book_Reading_Activity.book_id = Combined_Book_Table.book_id
+LEFT JOIN Book_Views_Estimate ON Book_Views_Estimate.book_id = Combined_Book_Table.book_id
+LEFT JOIN User_signups ON User_signups.referrer_book = Combined_Book_Table.book_id
+LEFT JOIN analytics_reporting.books ON analytics_reporting.books.book_id = Combined_Book_Table.book_id
+
+----------------------------------------------------
+
+/* comparison by week */
+
+WITH Combined_Book_Table AS (
+SELECT *
+FROM (
+SELECT book_id, 'Benchamrk' AS Book_Group
+FROM athena_analytics.hw_top_100)
+UNION ALL
+SELECT *
+FROM (
+SELECT perlego_book_id AS book_id, 'Wiley' AS Book_Group
+FROM athena_analytics.hw_wiley_top_100)),
+
+/* collect basic reading stats for each group from 20th feb - 20th June  */
+
+Book_Reading_Activity_Week AS (
+SELECT book_id, 
+       DATE_TRUNC('week', reading_date) as reading_week,
+       subject_name,
+       COUNT(*) AS Books_Opened,
+       COUNT(DISTINCT(analytics_reporting.reading_activity_daily.user_id)) AS Unique_Users, 
+       SUM(Reading_duration_minutes) AS Mins_Read,
+       
+       COUNT(CASE WHEN payment_channel_crude = 'indirect' THEN book_id ELSE NULL END) AS Books_Opened_B2B_Users,
+       COUNT(DISTINCT(CASE WHEN payment_channel_crude = 'indirect' THEN analytics_reporting.reading_activity_daily.user_id ELSE NULL END)) AS Unique_Users_B2B_Users, 
+       ROUND(SUM(CASE WHEN payment_channel_crude = 'indirect' THEN reading_duration_minutes ELSE NULL END), 2) AS Mins_Read_B2B_Users,
+       
+       COUNT(CASE WHEN payment_channel_crude = 'direct' THEN book_id ELSE NULL END) AS Books_Opened_D2C_Users,
+       COUNT(DISTINCT(CASE WHEN payment_channel_crude = 'direct' THEN analytics_reporting.reading_activity_daily.user_id ELSE NULL END)) AS Unique_Users_D2C_Users, 
+       ROUND(SUM(CASE WHEN payment_channel_crude = 'direct' THEN reading_duration_minutes ELSE NULL END), 2) AS Mins_Read_D2C_Users
+       
+FROM analytics_reporting.reading_activity_daily 
+LEFT JOIN analytics_reporting.user_registrations ON analytics_reporting.user_registrations.user_id = analytics_reporting.reading_activity_daily.user_id
+WHERE book_id IN (SELECT book_id FROM Combined_Book_Table)
+AND reading_date >= CAST('2023-02-21' AS DATE) AND reading_date <= CAST('2023-06-21' AS DATE)
+GROUP BY book_id, DATE_TRUNC('week', reading_date), subject_name)
+
+
+SELECT Combined_Book_Table.*,
+       subject_name,
+       Books_Opened_D2C_Users,
+       Unique_Users_D2C_Users,
+       Mins_Read_D2C_Users,
+       reading_week
+FROM Combined_Book_Table
+LEFT JOIN Book_Reading_Activity_Week ON Book_Reading_Activity_Week.book_id = Combined_Book_Table.book_id
+
+----------- average % read - % completed - 5, 10, 20, 50, 75
+
+WITH Combined_Book_Table AS (
+SELECT *
+FROM (
+SELECT book_id, 'Benchamrk' AS Book_Group
+FROM athena_analytics.hw_top_100)
+UNION ALL
+SELECT *
+FROM (
+SELECT perlego_book_id AS book_id, 'Wiley' AS Book_Group
+FROM athena_analytics.hw_wiley_top_100))
+
+SELECT book_id, user_id, Book_Group, subject_name, reading_month, SUM(percentage_read) as total_percent_read
+FROM (
+SELECT Combined_Book_Table.book_id, 
+       subject_name,
+       user_id,
+       Book_Group,
+       location_id,
+       date_trunc('month', date_week) as reading_month,
+       percentage_read
+FROM Combined_Book_Table
+LEFT JOIN reporting_layer.view_read_records_weekly_chapter_level on Combined_Book_Table.book_id = reporting_layer.view_read_records_weekly_chapter_level.book_id 
+LEFT JOIN analytics_reporting.books ON analytics_reporting.books.book_id = Combined_Book_Table.book_id
+WHERE user_id in (select user_id from analytics_reporting.user_registrations where payment_channel_crude = 'direct')
+AND date_week >= cast('2023-02-21' as date) and date_week <= cast('2023-06-21' as date)
+GROUP BY Combined_Book_Table.book_id, 
+       user_id,
+       Book_Group,
+       subject_name,
+       location_id,
+       date_trunc('month', date_week),
+       percentage_read)
+group by book_id, user_id, Book_Group, reading_month, subject_name
+
+--------------- reading income 
+
+WITH Combined_Book_Table AS (
+SELECT *
+FROM (
+SELECT book_id, 'Benchamrk' AS Book_Group
+FROM athena_analytics.hw_top_100)
+UNION ALL
+SELECT *
+FROM (
+SELECT perlego_book_id AS book_id, 'Wiley' AS Book_Group
+FROM athena_analytics.hw_wiley_top_100))
+
+
+SELECT Combined_Book_Table.book_id,
+       Combined_Book_Table.Book_Group,
+       DATE_TRUNC('week', reading_date) as read_week,
+       SUM(reading_cost) as reading_total
+       FROM Combined_Book_Table 
+LEFT JOIN analytics_reporting.reading_costs ON Combined_Book_Table.book_id = analytics_reporting.reading_costs.book_id
+WHERE user_id in (select user_id from analytics_reporting.user_registrations where payment_channel_crude = 'direct')
+and reading_date >= cast('2023-02-21' as date) and reading_date <= cast('2023-06-21' as date)
+GROUP BY Combined_Book_Table.book_id,
+         Combined_Book_Table.Book_Group,
+         DATE_TRUNC('week', reading_date)
+
+----------- what other wiley users do - read one of the top 100 then what do they do afterwards ? 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+-----------------
+
+/* find wiley books read - group by each user  */
+WITH Wiley_Books_Read AS (
+SELECT user_id, b.book_id as wiley_base_book, b.book_title as wiley_title, 
+       SUM(reading_duration_minutes) as Wiley_total_mins, 
+       MIN(Reading_date) as first_reading_date_wiley,
+       b.publisher_name, b.subject_name, b.topic_name_1
+FROM analytics_reporting.reading_activity_daily 
+LEFT JOIN analytics_reporting.books as b ON b.book_id = analytics_reporting.reading_activity_daily.book_id
+WHERE b.book_id IN (SELECT perlego_book_id FROM athena_analytics.hw_wiley_top_100)
+AND reading_date >= CAST('2023-02-21' AS DATE) AND reading_date <= CAST('2023-06-21' AS DATE)
+AND user_id in (select user_id from analytics_reporting.user_registrations where payment_channel_crude = 'direct')
+GROUP BY user_id, b.book_id, b.book_title, b.publisher_name, b.subject_name, b.topic_name_1),
+
+/* find books read by other users  */
+Other_books_users_read AS (
+SELECT user_id, b.book_id as other_book_id, b.book_title as other_book_title, 
+       SUM(reading_duration_minutes) as other_total_mins,
+       MIN(Reading_date) as first_reading_date_other,
+       b.subject_name as other_subject,
+       b.topic_name_1 as other_topic,
+       b.publisher_name as other_publisher
+FROM analytics_reporting.reading_activity_daily 
+LEFT JOIN analytics_reporting.books as b ON b.book_id = analytics_reporting.reading_activity_daily.book_id
+WHERE user_id IN (SELECT user_id FROM Wiley_Books_Read)
+AND reading_date >= CAST('2023-02-21' AS DATE) AND reading_date <= CAST('2023-06-21' AS DATE)
+AND user_id in (select user_id from analytics_reporting.user_registrations where payment_channel_crude = 'direct')
+GROUP BY user_id, b.book_id, b.book_title, b.subject_name, b.topic_name_1, b.publisher_name
+),
+
+/* combine the two and exlcude the first wiley book used  */
+Combined_Book_Data AS (
+SELECT Wiley_Books_Read.*,
+       other_book_id,
+       other_book_title,
+       other_total_mins,
+       other_subject,
+       other_topic,
+       other_publisher
+FROM Wiley_Books_Read
+LEFT JOIN Other_books_users_read ON Other_books_users_read.user_id = Wiley_Books_Read.user_id
+WHERE other_book_id is null or ((wiley_base_book <> other_book_id and other_book_title <> wiley_title))
+AND (first_reading_date_other is null or first_reading_date_wiley <= first_reading_date_other))
+
+
+
+SELECT wiley_base_book, 
+       wiley_title,
+       other_book_id,
+       other_book_title,
+       Wiley_total_mins,
+       user_id,
+       other_total_mins,
+       other_subject,
+       other_topic,
+       other_publisher,
+       CASE WHEN other_book_id IN (SELECT perlego_book_id FROM athena_analytics.hw_wiley_top_100) then 1 else 0 end as other_wiley_100
+FROM Combined_Book_Data
+
+-------- average number books read afterwards 
+
+
+/* find wiley books read - group by each user  */
+WITH Wiley_Books_Read AS (
+SELECT user_id, b.book_id as wiley_base_book, b.book_title as wiley_title, 
+       SUM(reading_duration_minutes) as Wiley_total_mins, 
+       MIN(Reading_date) as first_reading_date_wiley,
+       b.publisher_name, b.subject_name, b.topic_name_1
+FROM analytics_reporting.reading_activity_daily 
+LEFT JOIN analytics_reporting.books as b ON b.book_id = analytics_reporting.reading_activity_daily.book_id
+WHERE b.book_id IN (SELECT perlego_book_id FROM athena_analytics.hw_wiley_top_100)
+AND reading_date >= CAST('2023-02-21' AS DATE) AND reading_date <= CAST('2023-06-21' AS DATE)
+AND user_id in (select id from prod_gold_bucket_database.users where organisation_id is null)
+GROUP BY user_id, b.book_id, b.book_title, b.publisher_name, b.subject_name, b.topic_name_1),
+
+/* find books read by other users  */
+Other_books_users_read AS (
+SELECT user_id, b.book_id as other_book_id, b.book_title as other_book_title, 
+       SUM(reading_duration_minutes) as other_total_mins,
+       MIN(Reading_date) as first_reading_date_other,
+       b.subject_name as other_subject,
+       b.topic_name_1 as other_topic,
+       b.publisher_name as other_publisher
+FROM analytics_reporting.reading_activity_daily 
+LEFT JOIN analytics_reporting.books as b ON b.book_id = analytics_reporting.reading_activity_daily.book_id
+WHERE user_id IN (SELECT user_id FROM Wiley_Books_Read)
+AND reading_date >= CAST('2023-02-21' AS DATE) AND reading_date <= CAST('2023-06-21' AS DATE)
+AND user_id in (select id from prod_gold_bucket_database.users where organisation_id is null)
+GROUP BY user_id, b.book_id, b.book_title, b.subject_name, b.topic_name_1, b.publisher_name
+),
+
+/* combine the two and exlcude the first wiley book used  */
+Combined_Book_Data AS (
+SELECT Wiley_Books_Read.*,
+       other_book_id,
+       other_book_title,
+       other_total_mins,
+       other_subject,
+       other_topic,
+       other_publisher
+FROM Wiley_Books_Read
+LEFT JOIN Other_books_users_read ON Other_books_users_read.user_id = Wiley_Books_Read.user_id
+WHERE (other_book_id is null or (wiley_base_book <> other_book_id and other_book_title <> wiley_title))
+AND (first_reading_date_other is null or first_reading_date_wiley <= first_reading_date_other))
+
+select user_id, 
+       count(other_book_id) as other_books, 
+       count(distinct(other_book_id)) as other_unique_books, 
+       sum(other_total_mins) as other_total_mins, 
+       count(distinct(case when other_publisher = 'Wiley' then other_book_id else null end)) as other_wiley_books,
+       SUM(CASE WHEN other_book_id IN (SELECT perlego_book_id FROM athena_analytics.hw_wiley_top_100) then 1 else 0 end) as other_wiley_top_100,
+       
+       count(case when subject_name = 'Business' then other_book_id else null end) as other_books_wiley_bus, 
+       count(distinct(case when subject_name = 'Business' then other_book_id else null end)) as other_unique_books_wiley_bus, 
+       sum(case when subject_name = 'Business' then other_total_mins else null end) as other_total_mins_wiley_bus, 
+       count(distinct(case when other_publisher = 'Wiley' AND subject_name = 'Business' then other_book_id else null end)) as other_wiley_books_wiley_bus,
+       SUM(CASE WHEN other_book_id IN (SELECT perlego_book_id FROM athena_analytics.hw_wiley_top_100) AND subject_name = 'Business' then 1 else 0 end) as other_wiley_top_100_wiley_bus
+from Combined_Book_Data
+group by user_id 
+
+
+
+
+
+
+
