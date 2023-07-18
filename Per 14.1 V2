@@ -1,0 +1,292 @@
+/* Create reporting table used in Metabase */
+
+
+CREATE EXTERNAL TABLE athena_analytics.hw_per_14_1_v2 (
+visitor_id string,
+experiment_id string,
+experiment_name string,
+variation_id string,
+variation_name string,
+first_event_time timestamp,
+last_event_time timestamp,
+event_tracking_first_date timestamp,
+geo_location_visitor string,
+vistor_in_event_tracking bigint,
+vistor_created_account bigint,
+user_id bigint,
+user_id_visitor_order bigint,
+src_subscription_id string,
+src_sub_category_id string,
+Plan_Exp_Group string,
+Plan_Details string,
+Trial_Start_Date timestamp,
+Trial_End_Date timestamp,
+Trial_Cancel_Date timestamp,
+Sub_Start_Date timestamp,
+Sub_End_Date timestamp,
+Sub_Cancel_Date timestamp,
+total_paid_gbp double,
+Plan_Start_Date timestamp,
+Plan_End_Date timestamp,
+Plan_Cancel_Date_Pre timestamp,
+acquisition_country string,
+registration_time timestamp,
+utm_medium string,
+utm_source string,
+utm_campaign string,
+organisation_id bigint,
+Signup_Pre_Exp bigint,
+user_status string,
+part_of_exp bigint,
+Plan_Cancel_Date timestamp)
+
+LOCATION 's3://perlego-s3-reference-tb/athena_analytics/hw_per_14_1_v2/'
+TBLPROPERTIES ('has_encrypted_data'='false');
+
+/* 
+https://s3.console.aws.amazon.com/s3/buckets/perlego-s3-reference-tb?region=eu-west-2&prefix=athena_analytics/free_trial_remove_exp/&showversions=false
+*/
+
+/* Insert the data into the table */
+
+INSERT INTO athena_analytics.hw_per_14_1_v2 (
+visitor_id,
+experiment_id,
+experiment_name,
+variation_id,
+variation_name,
+first_event_time,
+last_event_time,
+event_tracking_first_date,
+geo_location_visitor,
+vistor_in_event_tracking,
+vistor_created_account,
+user_id,
+user_id_visitor_order,
+src_subscription_id,
+src_sub_category_id,
+Plan_Exp_Group,
+Plan_Details,
+Trial_Start_Date,
+Trial_End_Date,
+Trial_Cancel_Date,
+Sub_Start_Date,
+Sub_End_Date,
+Sub_Cancel_Date,
+total_paid_gbp,
+Plan_Start_Date,
+Plan_End_Date,
+Plan_Cancel_Date_Pre,
+acquisition_country,
+registration_time,
+utm_medium,
+utm_source,
+utm_campaign,
+organisation_id,
+Signup_Pre_Exp,
+user_status,
+part_of_exp,
+Plan_Cancel_Date)
+
+
+/* Remove visitor id duplicates and mark control / variation users - test applied in the python file to assure that each visitor only has one variation id */
+
+WITH Grouped_Optimizely_File AS (
+
+SELECT visitor_id, experiment_id, 'Per 14.1' AS experiment_name, variation_id, 
+       CASE WHEN variation_id = '24468821004' THEN 'Control'
+            WHEN variation_id = '24515121121' THEN 'Variation' ELSE NULL END AS variation_name,
+       MIN(record_timestamp) as first_event_time,
+       MAX(record_timestamp) as last_event_time
+FROM reference_tables.optimizely_visitors_14_1
+GROUP BY visitor_id, experiment_id, variation_id, 
+         CASE WHEN variation_id = '24468821004' THEN 'Control'
+              WHEN variation_id = '24515121121' THEN 'Variation' ELSE NULL END
+),
+
+/* Mark how many of the visitors can be matched to the tracking service. Filter the records to the first time the visitor is seen. Also record the first geo location identified and mark the visitor from that region. As there is no geo location in the parquet files. */
+
+Unique_visitors_identified AS (
+SELECT unique_id, identified_in_tracking_service, event_tracking_first_date, First_USA_Time, First_GB_Time,
+       CASE WHEN First_USA_Time IS NOT NULL AND First_GB_Time IS NULL THEN 'USA'
+            WHEN First_USA_Time IS NULL AND First_GB_Time IS NOT NULL THEN 'UK'
+            WHEN First_USA_Time IS NOT NULL AND First_GB_Time IS NOT NULL 
+            AND First_USA_Time > First_GB_Time THEN 'UK'
+            WHEN First_USA_Time IS NOT NULL AND First_GB_Time IS NOT NULL 
+            AND First_USA_Time < First_GB_Time THEN 'USA' 
+            ELSE 'Unknown' END AS geo_location_visitor
+FROM (
+select unique_id, 
+       1 as identified_in_tracking_service, 
+       Record_date as event_tracking_first_date, 
+       CASE WHEN geo_location = 'US' THEN MIN(record_date) OVER (PARTITION BY unique_id) ELSE NULL END AS First_USA_Time,
+       CASE WHEN geo_location = 'GB' THEN MIN(record_date) OVER (PARTITION BY unique_id) ELSE NULL END AS First_GB_Time,
+       ROW_NUMBER() OVER (PARTITION BY unique_id ORDER BY record_date ASC) as row_rank
+FROM prod_gold_bucket_database.event_tracking 
+WHERE unique_id IN (SELECT visitor_id FROM Grouped_Optimizely_File))
+WHERE row_rank = 1),
+
+/* Find the first user_id associated with each unique_id that we can match to. Used to match to the subscriptions and user registrations tables */
+
+Unique_users_identified AS (
+SELECT unique_id, user_id, 1 AS visitor_created_account
+FROM (
+SELECT *, ROW_NUMBER() OVER (PARTITION BY unique_id ORDER BY first_date_seen ASC) as row_rank
+FROM (
+SELECT unique_id, user_id, MIN(record_date) as first_date_seen
+FROM prod_gold_bucket_database.event_tracking 
+WHERE unique_id IN (SELECT visitor_id FROM Grouped_Optimizely_File)
+AND user_id IS NOT NULL
+GROUP BY unique_id, user_id)
+) WHERE row_rank = 1
+),
+
+/* Combine users and identified visitors to the optimizely file. Ensure there are no duplicate users by filtering to the first user_id seen. As user_id can appear multiple times if they log in to the service over multiple days.  */
+
+Combined_File AS (
+SELECT *
+FROM (
+SELECT Grouped_Optimizely_File.*, 
+       event_tracking_first_date,
+       geo_location_visitor,
+       COALESCE(identified_in_tracking_service, 0) AS vistor_in_event_tracking,
+       COALESCE(visitor_created_account, 0) AS vistor_created_account,
+       user_id,
+       CAST(CASE WHEN user_id IS NOT NULL THEN ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY event_tracking_first_date ASC) ELSE 1 END AS INT) AS user_id_visitor_order
+FROM Grouped_Optimizely_File
+LEFT JOIN Unique_visitors_identified ON Unique_visitors_identified.unique_id = Grouped_Optimizely_File.visitor_id 
+LEFT JOIN Unique_users_identified ON Unique_users_identified.unique_id = Grouped_Optimizely_File.visitor_id)
+WHERE user_id_visitor_order = 1),
+
+/* Join optimizely file to subscriptions table 
+
+1- Join refunded subscriptions from the test plans to the main file. As they will not appear under the current reporting logic. Refunded subscriptions in the control group are already in the table due to their trial record. 
+2- Find the latest trial and subscription information for each user 
+
+*/
+
+Missing_Subs_Added AS (
+
+SELECT user_id, src_subscription_id, src_sub_category_id, subscription_type, start_timestamp, end_timestamp, subscription_canceled_at, total_paid_gbp
+FROM analytics_reporting.subscriptions
+UNION ALL 
+SELECT user_id, 
+       id AS src_subscription_id,
+       plan_id AS src_sub_category_id,
+       'subscribed' AS subscription_type, 
+       subscription_created_at AS start_timestamp,
+       subscription_cancel_at AS end_timestamp,
+       subscription_canceled_at_min AS subscription_canceled_at,
+       NULL AS total_paid_gbp
+FROM prod_gold_bucket_database.subscriptions 
+WHERE plan_id IN ('price_1NDmuULmu5QiBx4B5hM9WZDJ',
+                  'price_1NDmshLmu5QiBx4BbOeGG4aU',
+                  'price_1NDmqMLmu5QiBx4BubTllr4j',
+                  'price_1NDmmHLmu5QiBx4BktSh62YL')
+AND user_id NOT IN (SELECT user_id FROM analytics_reporting.subscriptions)
+),
+
+/* Create seperate date columns for subscriptions and trials depending on the plan type - also record if a plan is one that was created for the experiment  */
+
+Subscription_Info AS (
+
+SELECT *,
+
+       CASE WHEN src_sub_category_id IN ('price_1NDmuULmu5QiBx4B5hM9WZDJ',
+                                         'price_1NDmshLmu5QiBx4BbOeGG4aU',
+                                         'price_1NDmqMLmu5QiBx4BubTllr4j',
+                                         'price_1NDmmHLmu5QiBx4BktSh62YL') 
+             THEN 'Variation' ELSE 'Control' END AS Plan_Exp_Group,
+
+       CASE WHEN src_sub_category_id IN ('price_1NDmuULmu5QiBx4B5hM9WZDJ',                                                       'price_1KTOPmLmu5QiBx4Bwnge2GIQ') THEN 'Yearly - US'
+            WHEN src_sub_category_id IN ('price_1NDmqMLmu5QiBx4BubTllr4j',                                                  'price_1Kt9EZLmu5QiBx4Bgk7I2HLw') THEN 'Yearly - UK'
+            WHEN src_sub_category_id IN ('price_1NDmshLmu5QiBx4BbOeGG4aU',                                                  'price_1KTOQGLmu5QiBx4BFiRo8kdY') THEN 'Monthly - US'
+            WHEN src_sub_category_id IN ('price_1Kt9FWLmu5QiBx4BFLFLFzPc',                                                  'price_1NDmmHLmu5QiBx4BktSh62YL') THEN 'Monthly - UK'
+            ELSE NULL END AS Plan_Details,
+            
+    ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY Sub_Start_Date DESC) AS sub_start_num_desc
+       
+FROM (
+SELECT user_id, src_subscription_id, src_sub_category_id,
+       MAX(CASE WHEN subscription_type = 'trial' THEN start_timestamp ELSE NULL END) AS Trial_Start_Date,
+       MAX(CASE WHEN subscription_type = 'trial' THEN end_timestamp ELSE NULL END) AS Trial_End_Date,
+       MAX(CASE WHEN subscription_type = 'trial' THEN subscription_canceled_at ELSE NULL END) AS Trial_Cancel_Date,
+       
+       MAX(CASE WHEN subscription_type = 'subscribed' THEN start_timestamp ELSE NULL END) AS Sub_Start_Date,
+       MAX(CASE WHEN subscription_type = 'subscribed' THEN end_timestamp ELSE NULL END) AS Sub_End_Date,
+       MAX(CASE WHEN subscription_type = 'subscribed' THEN subscription_canceled_at ELSE NULL END) AS Sub_Cancel_Date,
+       MAX(total_paid_gbp) AS total_paid_gbp
+FROM Missing_Subs_Added 
+WHERE user_id IN (SELECT user_id FROM Combined_File)
+GROUP BY user_id, src_subscription_id, src_sub_category_id
+)
+),
+
+/* Create main data table filtering to most recent subscription if applicable. Also mark what kind of visitor we think the user is. As we only wish to report on users who were definetly part of the experiment */
+
+Final_File AS (
+
+SELECT *, 
+       CASE WHEN user_status = 'Fresh Visitor' THEN 1 ELSE 0 END AS part_of_exp
+FROM (
+SELECT Combined_File.*, 
+       src_subscription_id, 
+       src_sub_category_id,
+       Plan_Exp_Group,
+       Plan_Details,
+       Trial_Start_Date, 
+       Trial_End_Date,
+       Trial_Cancel_Date,
+       Sub_Start_Date, 
+       Sub_End_Date,
+       Sub_Cancel_Date,
+       total_paid_gbp,
+       CASE WHEN Trial_Start_Date IS NOT NULL THEN Trial_Start_Date ELSE Sub_Start_Date 
+            END AS Plan_Start_Date,
+       CASE WHEN Trial_End_Date IS NOT NULL THEN Trial_End_Date ELSE Sub_End_Date 
+            END AS Plan_End_Date,  
+       CASE WHEN Trial_Cancel_Date IS NOT NULL THEN Trial_Cancel_Date ELSE Sub_Cancel_Date 
+            END AS Plan_Cancel_Date_Pre,     
+       acquisition_country,
+       registration_time, 
+       utm_medium, 
+       utm_source,
+       utm_campaign,
+       organisation_id,
+      CASE WHEN registration_time < CAST('2023-06-29 18:13:00' AS timestamp) THEN 1 ELSE 0 END AS Signup_Pre_Exp,
+       
+      CASE WHEN organisation_id IS NOT NULL THEN 'B2B User'
+            WHEN Sub_Start_Date < CAST('2023-06-29 18:13:00' AS timestamp) 
+            AND Sub_End_Date >= CAST('2023-06-29 18:13:00' AS timestamp) THEN 'Return Visitor - Active Subscription'
+            
+            WHEN Trial_Start_Date < CAST('2023-06-29 18:13:00' AS timestamp) AND Trial_Start_Date >= CAST('2023-06-29 18:13:00' AS timestamp) THEN 'Return Visitor - Active Trial'
+            
+            WHEN Sub_Start_Date < CAST('2023-06-29 18:13:00' AS timestamp) 
+            AND Sub_End_Date <= CAST('2023-06-29 18:13:00' AS timestamp) THEN 'Return Visitor - Expired Subscription'
+            
+            WHEN Trial_Start_Date < CAST('2023-06-29 18:13:00' AS timestamp) AND Trial_End_Date IS NULL THEN 'Return Visitor - Trial User'
+            
+            WHEN (Sub_Start_Date IS NULL OR Sub_Start_Date >= CAST('2023-06-29 18:13:00' AS timestamp)) AND registration_time < CAST('2023-06-29 18:13:00' AS timestamp) THEN 'Return Visitor - With Account' 
+            
+            WHEN registration_time >= CAST('2023-06-29 18:13:00' AS timestamp) OR registration_time IS NULL THEN 'Fresh Visitor' ELSE NULL END AS user_status
+FROM Combined_File
+LEFT JOIN Subscription_Info ON Subscription_Info.user_id = Combined_File.user_id
+LEFT JOIN analytics_reporting.user_registrations ON analytics_reporting.user_registrations.user_id = Combined_File.user_id
+WHERE (sub_start_num_desc is null or sub_start_num_desc = 1)
+)
+),
+
+/* Add in fix to address issue of user cancellation date not coming through in the subscriptions table - will use event tracking instead */
+
+event_tracking_cancellation_date AS (
+SELECT user_id, MIN(record_date) as tracking_cancellation_date
+FROM prod_gold_bucket_database.event_tracking 
+WHERE event_name = 'subscription cancellation'
+AND user_id in (SELECT user_id FROM Final_File)
+GROUP BY user_id)
+
+/* Final output table here */
+SELECT Final_File.*,
+       CASE WHEN tracking_cancellation_date IS NOT NULL AND tracking_cancellation_date < Plan_Cancel_Date_Pre THEN tracking_cancellation_date ELSE Plan_Cancel_Date_Pre END AS Plan_Cancel_Date
+FROM Final_File
+LEFT JOIN event_tracking_cancellation_date ON event_tracking_cancellation_date.user_id = Final_File.user_id
