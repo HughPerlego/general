@@ -182,11 +182,12 @@ FROM prod_gold_bucket_database.subscriptions
 WHERE plan_id IN ('price_1NDmuULmu5QiBx4B5hM9WZDJ',
                   'price_1NDmshLmu5QiBx4BbOeGG4aU',
                   'price_1NDmqMLmu5QiBx4BubTllr4j',
-                  'price_1NDmmHLmu5QiBx4BktSh62YL')
-AND user_id NOT IN (SELECT user_id FROM analytics_reporting.subscriptions)
+                  'price_1NDmmHLmu5QiBx4BktSh62YL',
+                  'price_1NVGr7Lmu5QiBx4BuvFv0i4a')
+AND user_id NOT IN (SELECT user_id FROM analytics_reporting.subscriptions where user_id is not null)
 ),
 
-/* Create seperate date columns for subscriptions and trials depending on the plan type - also record if a plan is one that was created for the experiment  */
+/* Create seperate date columns for subscriptions and trials depending on the plan type - also record if a plan is one that was created for the experiment  also apply correction to plans price_1NVGr7Lmu5QiBx4BuvFv0i4a - as this is not a trial but a moving over of users from the first us annual plan*/
 
 Subscription_Info AS (
 
@@ -195,22 +196,23 @@ SELECT *,
        CASE WHEN src_sub_category_id IN ('price_1NDmuULmu5QiBx4B5hM9WZDJ',
                                          'price_1NDmshLmu5QiBx4BbOeGG4aU',
                                          'price_1NDmqMLmu5QiBx4BubTllr4j',
-                                         'price_1NDmmHLmu5QiBx4BktSh62YL') 
+                                         'price_1NDmmHLmu5QiBx4BktSh62YL',
+                                         'price_1NVGr7Lmu5QiBx4BuvFv0i4a') 
              THEN 'Variation' ELSE 'Control' END AS Plan_Exp_Group,
 
-       CASE WHEN src_sub_category_id IN ('price_1NDmuULmu5QiBx4B5hM9WZDJ',                                                       'price_1KTOPmLmu5QiBx4Bwnge2GIQ') THEN 'Yearly - US'
-            WHEN src_sub_category_id IN ('price_1NDmqMLmu5QiBx4BubTllr4j',                                                  'price_1Kt9EZLmu5QiBx4Bgk7I2HLw') THEN 'Yearly - UK'
-            WHEN src_sub_category_id IN ('price_1NDmshLmu5QiBx4BbOeGG4aU',                                                  'price_1KTOQGLmu5QiBx4BFiRo8kdY') THEN 'Monthly - US'
-            WHEN src_sub_category_id IN ('price_1Kt9FWLmu5QiBx4BFLFLFzPc',                                                  'price_1NDmmHLmu5QiBx4BktSh62YL') THEN 'Monthly - UK'
+CASE WHEN src_sub_category_id IN ('price_1NDmuULmu5QiBx4B5hM9WZDJ', 'price_1KTOPmLmu5QiBx4Bwnge2GIQ', 'price_1NVGr7Lmu5QiBx4BuvFv0i4a') THEN 'Yearly - US'
+     WHEN src_sub_category_id IN ('price_1NDmqMLmu5QiBx4BubTllr4j', 'price_1Kt9EZLmu5QiBx4Bgk7I2HLw') THEN 'Yearly - UK'
+     WHEN src_sub_category_id IN ('price_1NDmshLmu5QiBx4BbOeGG4aU', 'price_1KTOQGLmu5QiBx4BFiRo8kdY') THEN 'Monthly - US'
+     WHEN src_sub_category_id IN ('price_1Kt9FWLmu5QiBx4BFLFLFzPc', 'price_1NDmmHLmu5QiBx4BktSh62YL') THEN 'Monthly - UK'
             ELSE NULL END AS Plan_Details,
             
     ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY Sub_Start_Date DESC) AS sub_start_num_desc
        
 FROM (
 SELECT user_id, src_subscription_id, src_sub_category_id,
-       MAX(CASE WHEN subscription_type = 'trial' THEN start_timestamp ELSE NULL END) AS Trial_Start_Date,
-       MAX(CASE WHEN subscription_type = 'trial' THEN end_timestamp ELSE NULL END) AS Trial_End_Date,
-       MAX(CASE WHEN subscription_type = 'trial' THEN subscription_canceled_at ELSE NULL END) AS Trial_Cancel_Date,
+       MAX(CASE WHEN subscription_type = 'trial' AND src_sub_category_id <> 'price_1NVGr7Lmu5QiBx4BuvFv0i4a' THEN start_timestamp ELSE NULL END) AS Trial_Start_Date,
+       MAX(CASE WHEN subscription_type = 'trial' AND src_sub_category_id <> 'price_1NVGr7Lmu5QiBx4BuvFv0i4a' THEN end_timestamp ELSE NULL END) AS Trial_End_Date,
+       MAX(CASE WHEN subscription_type = 'trial' AND src_sub_category_id <> 'price_1NVGr7Lmu5QiBx4BuvFv0i4a' THEN subscription_canceled_at ELSE NULL END) AS Trial_Cancel_Date,
        
        MAX(CASE WHEN subscription_type = 'subscribed' THEN start_timestamp ELSE NULL END) AS Sub_Start_Date,
        MAX(CASE WHEN subscription_type = 'subscribed' THEN end_timestamp ELSE NULL END) AS Sub_End_Date,
@@ -286,10 +288,25 @@ AND user_id in (SELECT user_id FROM Final_File)
 GROUP BY user_id)
 
 /* Final output table here */
+
 SELECT Final_File.*,
        CASE WHEN tracking_cancellation_date IS NOT NULL AND tracking_cancellation_date < Plan_Cancel_Date_Pre THEN tracking_cancellation_date ELSE Plan_Cancel_Date_Pre END AS Plan_Cancel_Date
 FROM Final_File
 LEFT JOIN event_tracking_cancellation_date ON event_tracking_cancellation_date.user_id = Final_File.user_id
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
