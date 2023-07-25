@@ -290,3 +290,21 @@ SELECT Final_File.*,
        CASE WHEN tracking_cancellation_date IS NOT NULL AND tracking_cancellation_date < Plan_Cancel_Date_Pre THEN tracking_cancellation_date ELSE Plan_Cancel_Date_Pre END AS Plan_Cancel_Date
 FROM Final_File
 LEFT JOIN event_tracking_cancellation_date ON event_tracking_cancellation_date.user_id = Final_File.user_id
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
