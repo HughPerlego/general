@@ -1,0 +1,62 @@
+WITH Wiley_BMG_Books_Top_100 AS (
+SELECT *
+from (
+select bmg_isbn, 
+       title as bmg_title,
+       imprint as bmg_imprint_publisher,
+       author as bmg_author,
+       edition as bmg_edition,
+       perlego_bookId,
+       Available_status,
+       sum(enrollments_adjusted) enrolment_capacity, rank() over(partition by 1 order by sum(enrollments_adjusted) desc ) rnk,
+       ROUND(1.0*avg(TRY(CAST(substr(course_number, 1, 1) as int))), 1) as avg_course_num,
+       COUNT(*) AS courses_book_seen_In,
+       MAX(algo_match_score) as algo_match_score
+from analytics_reporting.bmg_matched_data
+where bmg_isbn not in (select bmg_isbn from athena_analytics.nb_bmg_invalid_titles)
+and imprint in ('Wiley', 'Wiley-Blackwell', 'Wiley-VCH','For Dummies','Polity','Jossey-Bass','Wiley-ISTE','Wiley-Interscience','Wiley-IEEE Press',
+'Wiley-Scrivener','Sybex','Capstone','Wiley-American Ceramic Society','Ernst & Sohn','Wrox','BMJ Books','American Geophysical Union','Wiley-AIChE','Bloomberg Press','Pfeiffer','American Counseling Association','ASM Press','Publicis','Visual','Wiley-IEEE Computer Society Pr','Wiley-ASME Press Series','Wiley-Liss','RSMeans','Audel','Polity','ACSESS','Academy Press','Standards Information Network','BPS Blackwell','Wiley-TMS','Wiley-OSA','Wiley-Spektrum','Polity Press')
+group by 1,2,3,4,5,6,7
+) where rnk <= 100
+),
+
+/* Join data to Perlego books - for books where we match to multiple perlego books and they seem to be duplicates - we truncate them into one record - so we can record all user engagnment, as otherwise we may miss some user engagnment */
+
+Match_To_Perlego AS (
+
+SELECT *, CASE WHEN count_per_bmg_book < 2 THEN 'Select Book'
+               WHEN count_per_bmg_book >= 2 AND isbn_group_algo_score_match = 1 AND unique_perlego_isbns = count_per_bmg_book AND count_per_bmg_book > 1 THEN 'Combine Books'
+               WHEN count_per_bmg_book >= 2 AND isbn_group_algo_score_match = 1 AND unique_perlego_isbns < count_per_bmg_book THEN 'Select First Book Activated'
+               WHEN count_per_bmg_book >= 2 AND isbn_group_algo_score_match > 0 THEN 'Select Highest Algo Match' ELSE 'Unknown' END AS Filter_Book_Status
+FROM (
+SELECT Wiley_BMG_Books_Top_100.bmg_isbn,
+       b.book_title as perlego_book_title,
+       b.publisher_name as perlego_publisher_name, 
+       b.subject_name as perlego_subject_name, 
+       b.isbn_13 as perlego_isbn13,
+       b.currently_activated as perlego_book_available,
+       b."publisher_imprint",
+       b.contributors,
+       b_prod."product_edition_number",
+       b.date_activated,
+       algo_match_score,
+       COUNT(perlego_bookId) OVER (PARTITION BY Wiley_BMG_Books_Top_100.bmg_isbn) AS count_per_bmg_book,
+       dense_rank() OVER (PARTITION BY Wiley_BMG_Books_Top_100.bmg_isbn ORDER BY algo_match_score DESC) AS isbn_group_algo_score_match,
+       unique_perlego_isbns
+FROM Wiley_BMG_Books_Top_100
+LEFT JOIN analytics_reporting.books as b ON b.book_id = Wiley_BMG_Books_Top_100.perlego_bookId
+LEFT JOIN prod_gold_bucket_database.book_meta as b_prod ON b_prod.id = Wiley_BMG_Books_Top_100.perlego_bookId
+LEFT JOIN (SELECT Wiley_BMG_Books_Top_100.bmg_isbn, COUNT(DISTINCT(b.isbn_13)) AS unique_perlego_isbns 
+           FROM Wiley_BMG_Books_Top_100
+           LEFT JOIN analytics_reporting.books as b ON b.book_id = Wiley_BMG_Books_Top_100.perlego_bookId
+           GROUP BY bmg_isbn) AS unique_isbns_data ON unique_isbns_data.bmg_isbn = Wiley_BMG_Books_Top_100.bmg_isbn
+)
+)
+
+SELECT *
+FROM Match_To_Perlego
+
+
+
+
+
