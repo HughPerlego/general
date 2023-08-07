@@ -8,7 +8,8 @@ select bmg_isbn,
        edition as bmg_edition,
        perlego_bookId,
        Available_status,
-       sum(enrollments_adjusted) enrolment_capacity, rank() over(partition by 1 order by sum(enrollments_adjusted) desc ) rnk,
+       sum(enrollments_adjusted) enrolment_capacity,
+       rank() over(partition by 1 order by sum(enrollments_adjusted) desc ) rnk,
        ROUND(1.0*avg(TRY(CAST(substr(course_number, 1, 1) as int))), 1) as avg_course_num,
        COUNT(*) AS courses_book_seen_In,
        MAX(algo_match_score) as algo_match_score
@@ -17,7 +18,7 @@ where bmg_isbn not in (select bmg_isbn from athena_analytics.nb_bmg_invalid_titl
 and imprint in ('Wiley', 'Wiley-Blackwell', 'Wiley-VCH','For Dummies','Polity','Jossey-Bass','Wiley-ISTE','Wiley-Interscience','Wiley-IEEE Press',
 'Wiley-Scrivener','Sybex','Capstone','Wiley-American Ceramic Society','Ernst & Sohn','Wrox','BMJ Books','American Geophysical Union','Wiley-AIChE','Bloomberg Press','Pfeiffer','American Counseling Association','ASM Press','Publicis','Visual','Wiley-IEEE Computer Society Pr','Wiley-ASME Press Series','Wiley-Liss','RSMeans','Audel','Polity','ACSESS','Academy Press','Standards Information Network','BPS Blackwell','Wiley-TMS','Wiley-OSA','Wiley-Spektrum','Polity Press')
 group by 1,2,3,4,5,6,7
-) where rnk <= 100
+) where rnk <= 200
 ),
 
 /* Join data to Perlego books - for books where we match to multiple perlego books and they seem to be duplicates - we truncate them into one record - so we can record all user engagnment, as otherwise we may miss some user engagnment */
@@ -25,11 +26,12 @@ group by 1,2,3,4,5,6,7
 Match_To_Perlego AS (
 
 SELECT *, CASE WHEN count_per_bmg_book < 2 THEN 'Select Book'
-               WHEN count_per_bmg_book >= 2 AND isbn_group_algo_score_match = 1 AND unique_perlego_isbns = count_per_bmg_book AND count_per_bmg_book > 1 THEN 'Combine Books'
+               WHEN count_per_bmg_book >= 2 AND isbn_group_algo_score_match = 1 AND unique_perlego_isbns = count_per_bmg_book  THEN 'Combine Books'
                WHEN count_per_bmg_book >= 2 AND isbn_group_algo_score_match = 1 AND unique_perlego_isbns < count_per_bmg_book THEN 'Select First Book Activated'
                WHEN count_per_bmg_book >= 2 AND isbn_group_algo_score_match > 0 THEN 'Select Highest Algo Match' ELSE 'Unknown' END AS Filter_Book_Status
 FROM (
 SELECT Wiley_BMG_Books_Top_100.bmg_isbn,
+       b.book_id as perlego_book_id,
        b.book_title as perlego_book_title,
        b.publisher_name as perlego_publisher_name, 
        b.subject_name as perlego_subject_name, 
@@ -51,10 +53,149 @@ LEFT JOIN (SELECT Wiley_BMG_Books_Top_100.bmg_isbn, COUNT(DISTINCT(b.isbn_13)) A
            LEFT JOIN analytics_reporting.books as b ON b.book_id = Wiley_BMG_Books_Top_100.perlego_bookId
            GROUP BY bmg_isbn) AS unique_isbns_data ON unique_isbns_data.bmg_isbn = Wiley_BMG_Books_Top_100.bmg_isbn
 )
+),
+
+/* combine the meta data for books we think are duplicates - collect all reading activity on Perlego before combined*/
+
+Duplicate_Perlego_Books AS (
+SELECT bmg_isbn,
+       array_join(array_agg(perlego_book_id),', ') as perlego_book_id,
+       perlego_book_title,
+       perlego_publisher_name,
+       publisher_imprint,
+       perlego_subject_name,
+       perlego_book_available,
+       contributors,
+       product_edition_number,
+       array_join(array_agg(perlego_isbn13),', ') as perlego_isbn13, 
+       array_join(array_agg(date_activated),', ') as date_activated,
+       Filter_Book_Status,
+       SUM(Books_Read_Total) AS Books_Read_Total,
+       SUM(Mins_Read_Total) AS Mins_Read_Total,
+       SUM(Books_Read_3_Months) AS Books_Read_3_Months,
+       SUM(Mins_Read_3_Months) AS Mins_Read_3_Months,
+       SUM(D2C_Subscribers) AS D2C_Subscribers,
+       SUM(D2C_Subscribers_3_Months) AS D2C_Subscribers_3_Months
+       
+FROM (
+SELECT Match_To_Perlego.bmg_isbn,
+       perlego_book_title,
+       perlego_publisher_name,
+       perlego_subject_name,
+       perlego_book_available,
+       publisher_imprint,
+       contributors,
+       product_edition_number,
+       perlego_book_id,
+       perlego_isbn13,
+       Filter_Book_Status,
+       CAST(date_activated as date) AS date_activated, 
+       
+       COUNT(rd.book_id) AS Books_Read_Total,
+       SUM(Reading_Duration_Minutes) AS Mins_Read_Total,
+       
+       COUNT(CASE WHEN reading_date >= date_add('month', -3, current_date) THEN rd.book_id ELSE NULL END) AS Books_Read_3_Months,
+       SUM(CASE WHEN reading_date >= date_add('month', -3, current_date) THEN Reading_Duration_Minutes ELSE NULL END) AS Mins_Read_3_Months,
+       COUNT(DISTINCT(CASE WHEN converted_subscribed = 'Y' AND payment_channel_crude ='direct' THEN ur.user_id ELSE NULL END)) AS D2C_Subscribers,
+       COUNT(DISTINCT(CASE WHEN converted_subscribed = 'Y' AND payment_channel_crude ='direct' AND registration_time >= DATE_ADD('month', -3, current_date) THEN ur.user_id ELSE NULL END)) AS D2C_Subscribers_3_Months
+       
+FROM Match_To_Perlego
+LEFT JOIN analytics_reporting.reading_activity_daily as rd ON rd.book_id = Match_To_Perlego.perlego_book_id
+LEFT JOIN analytics_reporting.user_registrations as ur ON ur.referrer_book = Match_To_Perlego.perlego_book_id
+WHERE Filter_Book_Status = 'Combine Books'
+GROUP BY Match_To_Perlego.bmg_isbn,
+       perlego_book_title,
+       perlego_publisher_name,
+       perlego_subject_name,
+       perlego_book_available,
+       publisher_imprint,
+       contributors,
+       product_edition_number,
+       perlego_book_id,
+       perlego_isbn13,
+       Filter_Book_Status,
+       date_activated
+) GROUP BY bmg_isbn,
+       perlego_book_title,
+       perlego_publisher_name,
+       publisher_imprint,
+       perlego_subject_name,
+       perlego_book_available,
+       contributors,
+       product_edition_number,
+       Filter_Book_Status
+),
+
+
+/* Work out engangment for single Perlego books  */
+
+Single_Books_Engangment_Perlego AS (
+
+SELECT bmg_isbn,
+       CAST(perlego_book_id as varchar) AS perlego_book_id,
+       perlego_book_title,
+       perlego_publisher_name,
+       publisher_imprint,
+       perlego_subject_name,
+       perlego_book_available,
+       contributors,
+       product_edition_number,
+       perlego_isbn13,
+       CAST(date_activated as varchar) AS date_activated,
+       Filter_Book_Status,
+       
+       COUNT(rd.book_id) AS Books_Read_Total,
+       SUM(Reading_Duration_Minutes) AS Mins_Read_Total,
+       COUNT(CASE WHEN reading_date >= date_add('month', -3, current_date) THEN rd.book_id ELSE NULL END) AS Books_Read_3_Months,
+       SUM(CASE WHEN reading_date >= date_add('month', -3, current_date) THEN Reading_Duration_Minutes ELSE NULL END) AS Mins_Read_3_Months,
+       COUNT(DISTINCT(CASE WHEN converted_subscribed = 'Y' AND payment_channel_crude ='direct' THEN ur.user_id ELSE NULL END)) AS D2C_Subscribers,
+       COUNT(DISTINCT(CASE WHEN converted_subscribed = 'Y' AND payment_channel_crude ='direct' AND registration_time >= DATE_ADD('month', -3, current_date) THEN ur.user_id ELSE NULL END)) AS D2C_Subscribers_3_Months
+
+FROM Match_To_Perlego
+LEFT JOIN analytics_reporting.reading_activity_daily as rd ON rd.book_id = Match_To_Perlego.perlego_book_id
+LEFT JOIN analytics_reporting.user_registrations as ur ON ur.referrer_book = Match_To_Perlego.perlego_book_id
+WHERE Filter_Book_Status <> 'Combine Books'
+GROUP BY bmg_isbn,
+         perlego_book_id,
+         perlego_book_title,
+         perlego_publisher_name,
+         publisher_imprint,
+         perlego_subject_name,
+         perlego_isbn13,
+         product_edition_number,
+         perlego_book_available,
+         contributors,
+         date_activated,
+         Filter_Book_Status
+),
+
+/* Unique ISBN bmgdata to match to  */
+
+Unique_BMG_Data AS (
+
+SELECT bmg_isbn, bmg_title, bmg_author, bmg_imprint_publisher, bmg_edition, enrolment_capacity, rnk as bmg_rnk
+FROM Wiley_BMG_Books_Top_100
+GROUP BY bmg_isbn, bmg_title, bmg_author, bmg_imprint_publisher, bmg_edition, enrolment_capacity, rnk
 )
 
+/* Combine two data sources to have single list  */
+
+SELECT Unique_BMG_Data.bmg_title,
+       Unique_BMG_Data.bmg_author,
+       Unique_BMG_Data.bmg_imprint_publisher,
+       Unique_BMG_Data.bmg_edition,
+       enrolment_capacity,
+       bmg_rnk,
+       combined_data.*
+FROM (
 SELECT *
-FROM Match_To_Perlego
+FROM Single_Books_Engangment_Perlego
+UNION ALL
+SELECT *
+FROM Duplicate_Perlego_Books) AS combined_data 
+LEFT JOIN Unique_BMG_Data ON combined_data.bmg_isbn = Unique_BMG_Data.bmg_isbn
+
+
 
 
 
