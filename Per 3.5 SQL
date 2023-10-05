@@ -1,0 +1,241 @@
+/* 
+https://s3.console.aws.amazon.com/s3/buckets/perlego-s3-reference-tb?region=eu-west-2&prefix=athena_analytics/free_trial_remove_exp/&showversions=false
+*/
+
+CREATE EXTERNAL TABLE IF NOT EXISTS `reference_tables`.`optimizely_visitors_data_per_3_5` (
+  `uuid` varchar(300),
+  `record_timestamp` timestamp,
+  `visitor_id` varchar(300),
+  `experiment_id` varchar(300),
+  `variation_id` varchar(300)
+)
+				
+ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe' 
+WITH SERDEPROPERTIES (
+  'serialization.format' = ',',
+  'field.delim' = ','
+) LOCATION 's3://perlego-s3-reference-tb/csv_files/optimizely_visitors_per_3_5/'
+TBLPROPERTIES ('has_encrypted_data'='false');
+
+-- Creates the actual folder on S3
+CREATE EXTERNAL TABLE IF NOT EXISTS reference_tables.optimizely_visitors_per_3_5 (
+  uuid varchar(300),
+  record_timestamp timestamp,
+  visitor_id varchar(300),
+  experiment_id varchar(300),
+  variation_id varchar(300)
+)
+LOCATION 's3://perlego-s3-reference-tb/reference_tables/optimizely_visitors_per_3_5/'
+TBLPROPERTIES ('has_encrypted_data'='false');
+
+-- Seeds the folder using the table containing CSV data 
+INSERT into "reference_tables"."optimizely_visitors_per_3_5" (
+  uuid,
+  record_timestamp,
+  visitor_id,
+  experiment_id,
+  variation_id
+)
+SELECT *
+FROM "reference_tables"."optimizely_visitors_data_per_3_5";
+
+-- Drops the table containing CSV data.
+DROP TABLE reference_tables.optimizely_visitors_data_per_3_5;
+
+select *
+from optimizely_visitors_per_3_5
+where variation_id is not null 
+
+
+----------------
+
+/* remove duplicates at visitor id level assuming experinment & variation is the same  */
+WITH Grouped_Optimizely_File AS (
+
+SELECT visitor_id, experiment_id, 'Per 3.5' AS experiment_name, variation_id, 
+       CASE WHEN variation_id = '25138100102' THEN 'Control'
+            WHEN variation_id = '25120440099' THEN 'Variation' ELSE NULL END AS variation_name,
+       MIN(record_timestamp) as first_event_time,
+       MAX(record_timestamp) as last_event_time
+FROM reference_tables.optimizely_visitors_per_3_5
+GROUP BY visitor_id, experiment_id, variation_id, 
+         CASE WHEN variation_id = '25138100102' THEN 'Control'
+              WHEN variation_id = '25120440099' THEN 'Variation' ELSE NULL END
+),
+
+/* See cookie ids found in the tracking service */ 
+
+Cookie_event_tracking AS (
+SELECT *, 1 AS cookie_in_tracking_service
+FROM (
+SELECT *,
+        ROW_NUMBER() OVER (PARTITION BY unique_id ORDER BY first_uniqueid_tracking_date) as first_row_num
+FROM (
+SELECT unique_id,
+       TRY(CAST(JSON_EXTRACT(third_party_ids, '$.optimizely_cookie') as varchar)) AS                   optimizely_cookie_extract,
+       MIN(record_date) as first_uniqueid_tracking_date
+FROM prod_gold_bucket_database.event_tracking
+WHERE record_date >= CAST('2023-09-05' AS DATE) AND record_date <= CAST('2023-10-04' AS DATE)
+GROUP BY unique_id,
+         TRY(CAST(JSON_EXTRACT(third_party_ids, '$.optimizely_cookie') as varchar))
+) WHERE optimizely_cookie_extract IN (SELECT visitor_id FROM Grouped_Optimizely_File)
+) WHERE first_row_num = 1 
+),
+
+/* Find first cookie_id associated with each user_id- done to prevent duplication of user_id */
+
+First_user_id AS (
+SELECT *, 
+       1 AS cookie_account_created
+FROM (
+SELECT *, 
+       ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY first_user_tracking_date) as row_rank
+FROM (
+SELECT user_id, 
+       TRY(CAST(JSON_EXTRACT(third_party_ids, '$.optimizely_cookie') as varchar)) AS optimizely_cookie_extract,
+       MIN(record_date) as first_user_tracking_date
+FROM prod_gold_bucket_database.event_tracking
+WHERE record_date >= CAST('2023-09-05' AS DATE) AND record_date <= CAST('2023-10-04' AS DATE)
+AND user_id IS NOT NULL 
+GROUP BY user_id, 
+         TRY(CAST(JSON_EXTRACT(third_party_ids, '$.optimizely_cookie') as varchar))
+) WHERE optimizely_cookie_extract IN (SELECT visitor_id FROM Grouped_Optimizely_File)
+) WHERE row_rank = 1 
+),
+
+/* Combine to main optimizely cookie table - also join to main users table for dimension points  */
+
+Combined_Cookie_table AS (
+SELECT Grouped_Optimizely_File.*,
+       coalesce(Cookie_event_tracking.cookie_in_tracking_service,0) as cookie_in_tracking_service,
+       Cookie_event_tracking.unique_id as first_unique_id,
+       first_uniqueid_tracking_date,
+       coalesce(First_user_id.cookie_account_created, 0) as cookie_account_created,
+       First_user_id.user_id as First_user_id_seen,
+       registration_time as user_registration_time, 
+       acquisition_region,
+       acquisition_country,
+       payment_channel_crude 
+FROM Grouped_Optimizely_File
+LEFT JOIN Cookie_event_tracking ON Cookie_event_tracking.optimizely_cookie_extract = Grouped_Optimizely_File.visitor_id
+LEFT JOIN First_user_id ON First_user_id.optimizely_cookie_extract = Grouped_Optimizely_File.visitor_id
+LEFT JOIN analytics_reporting.user_registrations as u on u.user_id = First_user_id.user_id
+),
+
+/* Non refunded Subscription information */
+
+User_subscription_information AS (
+SELECT *
+FROM (
+SELECT user_id, start_timestamp as subscription_start_timestamp, end_timestamp as subscription_end_timestamp, src_sub_category_id, 'Not Refunded' AS    subscription_status,
+      ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY start_timestamp DESC) as row_rank_desc,
+
+       CASE WHEN src_sub_category_id 
+       IN ('price_1Kt9FWLmu5QiBx4BFLFLFzPc', 'price_1Kt9EZLmu5QiBx4Bgk7I2HLw', 'price_1NiNmzLmu5QiBx4BL8spvY4x', 'price_1NfmPqLmu5QiBx4Bkn80rOZV',
+           'price_1NiNnvLmu5QiBx4BdO7JtaXC') THEN 'UK'
+           WHEN src_sub_category_id IN 
+           ('price_1KTOQGLmu5QiBx4BFiRo8kdY', 'price_1KTOPmLmu5QiBx4Bwnge2GIQ', 
+           'price_1NibWcLmu5QiBx4BdxZPGWIY',  'price_1NfmRBLmu5QiBx4BL79U4Fyx', 
+           'price_1NibYPLmu5QiBx4BswZ4Pkhm') THEN 'US' ELSE 'Other' END AS Stripe_Plan_Country,
+        
+         CASE WHEN src_sub_category_id 
+         IN ('price_1Kt9FWLmu5QiBx4BFLFLFzPc', 'price_1Kt9EZLmu5QiBx4Bgk7I2HLw', 
+             'price_1KTOQGLmu5QiBx4BFiRo8kdY', 'price_1KTOPmLmu5QiBx4Bwnge2GIQ') THEN 'Control'
+             
+             WHEN src_sub_category_id 
+         IN ('price_1NiNmzLmu5QiBx4BL8spvY4x', 'price_1NfmPqLmu5QiBx4Bkn80rOZV', 'price_1NiNnvLmu5QiBx4BdO7JtaXC', 'price_1NibWcLmu5QiBx4BdxZPGWIY', 'price_1NfmRBLmu5QiBx4BL79U4Fyx', 'price_1NibYPLmu5QiBx4BswZ4Pkhm') THEN 'Test' ELSE 'Unknown' END AS Stripe_Plan_Exp,
+         
+         CASE WHEN src_sub_category_id 
+         IN ('price_1Kt9FWLmu5QiBx4BFLFLFzPc', 'price_1KTOQGLmu5QiBx4BFiRo8kdY', 'price_1NiNmzLmu5QiBx4BL8spvY4x', 'price_1NibWcLmu5QiBx4BdxZPGWIY') THEN 'Monthly'
+         
+         WHEN src_sub_category_id 
+         IN ('price_1Kt9EZLmu5QiBx4Bgk7I2HLw', 'price_1KTOPmLmu5QiBx4Bwnge2GIQ', 'price_1NiNnvLmu5QiBx4BdO7JtaXC', 'price_1NibYPLmu5QiBx4BswZ4Pkhm') THEN 'Yearly'
+         
+         WHEN src_sub_category_id 
+         IN ('price_1NfmPqLmu5QiBx4Bkn80rOZV', 'price_1NfmRBLmu5QiBx4BL79U4Fyx') THEN 'Semester' ELSE 'Unknown' END AS Stripe_Plan_Length,
+         
+         payment_channel
+           
+FROM analytics_reporting.subscriptions 
+WHERE user_id IN (SELECT First_user_id_seen FROM Combined_Cookie_table)
+AND subscription_start_timestamp >= CAST('2023-09-05' AS DATE) AND subscription_start_timestamp <= CAST('2023-10-04' AS DATE)
+AND subscription_type = 'subscribed')
+WHERE row_rank_desc = 1
+),
+
+/* Identify users with these plan ids & in optimizely id - but not in main subscription table - select last subscription generated in experinment time period to prevent duplication  */
+
+Refunded_subscriptions AS (
+SELECT *
+FROM 
+(
+SELECT s.user_id,
+       subscription_created_at as subscription_start_timestamp,
+       subscription_canceled_at as subscription_end_timestamp,
+       plan_id as src_sub_category_id,
+       'Refunded' AS subscription_status,
+       ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY subscription_created_at DESC) as row_rank_desc,
+       
+       CASE WHEN plan_id 
+       IN ('price_1Kt9FWLmu5QiBx4BFLFLFzPc', 'price_1Kt9EZLmu5QiBx4Bgk7I2HLw', 'price_1NiNmzLmu5QiBx4BL8spvY4x', 'price_1NfmPqLmu5QiBx4Bkn80rOZV',
+           'price_1NiNnvLmu5QiBx4BdO7JtaXC') THEN 'UK'
+           WHEN plan_id IN 
+           ('price_1KTOQGLmu5QiBx4BFiRo8kdY', 'price_1KTOPmLmu5QiBx4Bwnge2GIQ', 
+           'price_1NibWcLmu5QiBx4BdxZPGWIY',  'price_1NfmRBLmu5QiBx4BL79U4Fyx', 
+           'price_1NibYPLmu5QiBx4BswZ4Pkhm') THEN 'US' ELSE 'Other' END AS Stripe_Plan_Country,
+        
+         CASE WHEN plan_id 
+         IN ('price_1Kt9FWLmu5QiBx4BFLFLFzPc', 'price_1Kt9EZLmu5QiBx4Bgk7I2HLw', 
+             'price_1KTOQGLmu5QiBx4BFiRo8kdY', 'price_1KTOPmLmu5QiBx4Bwnge2GIQ') THEN 'Control'
+             
+             WHEN plan_id 
+         IN ('price_1NiNmzLmu5QiBx4BL8spvY4x', 'price_1NfmPqLmu5QiBx4Bkn80rOZV', 'price_1NiNnvLmu5QiBx4BdO7JtaXC', 'price_1NibWcLmu5QiBx4BdxZPGWIY', 'price_1NfmRBLmu5QiBx4BL79U4Fyx', 'price_1NibYPLmu5QiBx4BswZ4Pkhm') THEN 'Test' ELSE 'Unknown' END AS Stripe_Plan_Exp,
+         
+         CASE WHEN plan_id 
+         IN ('price_1Kt9FWLmu5QiBx4BFLFLFzPc', 'price_1KTOQGLmu5QiBx4BFiRo8kdY', 'price_1NiNmzLmu5QiBx4BL8spvY4x', 'price_1NibWcLmu5QiBx4BdxZPGWIY') THEN 'Monthly'
+         
+         WHEN plan_id 
+         IN ('price_1Kt9EZLmu5QiBx4Bgk7I2HLw', 'price_1KTOPmLmu5QiBx4Bwnge2GIQ', 'price_1NiNnvLmu5QiBx4BdO7JtaXC', 'price_1NibYPLmu5QiBx4BswZ4Pkhm') THEN 'Yearly'
+         
+         WHEN plan_id 
+         IN ('price_1NfmPqLmu5QiBx4Bkn80rOZV', 'price_1NfmRBLmu5QiBx4BL79U4Fyx') THEN 'Semester' ELSE 'Unknown' END AS Stripe_Plan_Length,
+         
+         'direct' as payment_channel
+         
+FROM prod_gold_bucket_database.subscriptions AS s 
+LEFT JOIN prod_gold_bucket_database.charges as c ON c.stripe_customer_id = s.stripe_customer_id
+WHERE plan_id IN ('price_1Kt9FWLmu5QiBx4BFLFLFzPc', 'price_1Kt9EZLmu5QiBx4Bgk7I2HLw',   'price_1NiNmzLmu5QiBx4BL8spvY4x', 'price_1NfmPqLmu5QiBx4Bkn80rOZV',
+                   'price_1NiNnvLmu5QiBx4BdO7JtaXC', 'price_1KTOQGLmu5QiBx4BFiRo8kdY', 'price_1KTOPmLmu5QiBx4Bwnge2GIQ', 
+                   'price_1NibWcLmu5QiBx4BdxZPGWIY',  'price_1NfmRBLmu5QiBx4BL79U4Fyx', 
+                   'price_1NibYPLmu5QiBx4BswZ4Pkhm')
+AND s.user_id NOT IN (SELECT user_id FROM User_subscription_information WHERE user_id IS NOT NULL)
+AND s.user_id IN (SELECT First_user_id_seen FROM Combined_Cookie_table WHERE First_user_id_seen IS NOT NULL)
+AND subscription_created_at >= CAST('2023-09-05' AS DATE) AND subscription_created_at <= CAST('2023-10-05' AS DATE)
+AND paid = true
+AND refunded = true 
+AND refund_created >= CAST('2023-09-05' AS DATE)
+) WHERE row_rank_desc = 1 
+),
+
+
+/* combine two subscription inforamtion tables before joining to main reporting table */
+
+Combined_Subscriptions AS (
+SELECT *
+FROM User_subscription_information
+UNION ALL 
+SELECT *
+FROM Refunded_subscriptions
+)
+
+SELECT Combined_Cookie_table.*,
+       subscription_start_timestamp, 
+       subscription_end_timestamp, 
+       src_sub_category_id,
+       subscription_status,
+       Stripe_Plan_Country,
+       Stripe_Plan_Exp,
+       Stripe_Plan_Length
+FROM Combined_Cookie_table
+LEFT JOIN Combined_Subscriptions ON Combined_Subscriptions.user_id = Combined_Cookie_table.First_user_id_seen
+
