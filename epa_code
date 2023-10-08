@@ -1,0 +1,165 @@
+WITH Relevant_Subscribers as (
+SELECT *
+FROM analytics_reporting.user_registrations 
+WHERE payment_channel_crude = 'direct'
+AND Acquisition_country = 'United Kingdom'
+),
+
+/* filter to distinct customer user ids  */
+
+Customer_user_unique_table AS (
+SELECT DISTINCT customer_id, user_id
+FROM fivetran_subscription_history
+WHERE user_id IN (SELECT user_id FROM Relevant_Subscribers)
+),
+
+/* Find first payment date per customer - limit to those that have had the opptotunity to make 12 months worth of payments  - inner join so that we are only selecting uk d2c users to reduce query time */
+
+Customer_Payment_Start AS (
+SELECT *
+FROM (
+SELECT c.customer_id,
+       cu.user_id,
+       MIN(c.created) as first_payment_date
+FROM prod_gold_bucket_database.fivetran_charge AS c
+INNER JOIN Customer_user_unique_table as cu ON cu.customer_id = c.customer_id
+WHERE c.paid = true
+AND c.refunded = false
+AND c.amount > 0
+GROUP BY c.customer_id, cu.user_id
+) WHERE first_payment_date < date_add('year', -1, current_date)
+),
+
+/* work out paid charge attempts per invoice and plan types to filter to monthly plans only */
+
+Failed_Payments AS (
+SELECT customer_id, invoice_id, COUNT(*) AS failed_payments_invoice
+from prod_gold_bucket_database.fivetran_charge 
+WHERE customer_id IN (SELECT customer_id FROM Customer_Payment_Start)
+AND paid = false
+GROUP BY customer_id, invoice_id
+),
+
+/* work out full payments table */
+
+All_12_Month_Payments AS (
+SELECT *,
+       CASE WHEN payment_order = 1 AND gbp_amount < 10 THEN 1 ELSE 0 END as first_payment_discount,
+       CASE WHEN payment_order = 1 THEN failed_payments_invoice ELSE NULL END as first_payment_failures 
+FROM (
+SELECT c."customer_id",
+       cps.user_id ,
+       first_payment_date,
+       date_add('month', 12,first_payment_date) max_time,
+       c.created,
+       c.amount,
+       c.currency,
+       c.amount_refunded,
+       c.refunded,
+       c.invoice_id,
+       CASE WHEN c.currency = 'gbp' then c.amount else c.amount/erd.rate end as gbp_amount,
+       ROW_NUMBER() OVER (PARTITION BY cps.user_id ORDER BY c.created ASC) AS payment_order,
+       failed_payments_invoice
+FROM "prod_gold_bucket_database".fivetran_charge c
+INNER JOIN Customer_Payment_Start AS cps on cps."customer_id" = c."customer_id"
+LEFT JOIN "reporting_layer"."exchange_rates_daily" erd ON (date(c.created) = date(erd."rate_date") AND UPPER(c."currency") = UPPER(erd."currency"))
+LEFT JOIN Failed_Payments AS f ON (f.customer_id = c.customer_id AND f.invoice_id = c.invoice_id)
+WHERE c.paid = true
+AND c.refunded = false
+AND c.created < DATE_ADD('year', 1, first_payment_date)
+AND c.amount > 0
+)
+),
+
+/* final summarised table */
+
+Summarised_Payment_Table AS (
+SELECT user_id,
+       first_payment_date,
+       first_payment_discount,
+       first_payment_failures,
+       COUNT(*) payments,
+       SUM(gbp_amount)/100 gbp_amount
+from All_12_Month_Payments
+group by user_id, 
+         first_payment_discount,
+         first_payment_date,
+         first_payment_failures),
+
+/* determine reading activity in first three weeks after making first payment */
+
+Reading_Activity AS (
+SELECT sp.user_id, first_payment_date, first_payment_discount, payments, gbp_amount,                  first_payment_failures,
+
+       COUNT(CASE WHEN reading_date <= date_add('week', 1, first_payment_date) THEN book_id ELSE NULL END) AS book_open_w1_trial,
+       COUNT(DISTINCT(CASE WHEN reading_date <= date_add('week', 1, first_payment_date) THEN book_id ELSE NULL END)) AS unique_book_open_w1_trial,
+       SUM(CASE WHEN reading_date <= date_add('week', 1, first_payment_date) THEN reading_duration_minutes ELSE 0 END) AS mins_read_w1_trial,
+
+
+       COUNT(CASE WHEN reading_date <= date_add('week', 1, first_payment_date) 
+             AND reading_date >= first_payment_date THEN book_id ELSE NULL END) AS book_open_w1,
+       COUNT(DISTINCT(CASE WHEN reading_date <= date_add('week', 1, first_payment_date) 
+            AND reading_date >= first_payment_date THEN book_id ELSE NULL END)) AS unique_book_open_w1,
+       SUM(CASE WHEN reading_date <= date_add('week', 1, first_payment_date)
+           AND reading_date >= first_payment_date 
+           THEN reading_duration_minutes ELSE 0 END) AS mins_read_w1,
+       
+       COUNT(CASE WHEN reading_date <= date_add('week', 2, first_payment_date) 
+             AND reading_date > date_add('week', 1, first_payment_date) THEN book_id ELSE NULL END) AS book_open_w2,
+       COUNT(DISTINCT(CASE WHEN reading_date <= date_add('week', 2, first_payment_date) 
+             AND reading_date > date_add('week', 1, first_payment_date)THEN book_id ELSE NULL END)) AS unique_book_open_w2,
+       SUM(CASE WHEN reading_date <= date_add('week', 2, first_payment_date) 
+           AND reading_date > date_add('week', 1, first_payment_date)THEN reading_duration_minutes ELSE 0 END) AS mins_read_w2,
+       
+       COUNT(CASE WHEN reading_date <= date_add('week', 3, first_payment_date) 
+       AND reading_date > date_add('week', 2, first_payment_date) THEN book_id ELSE NULL END) AS book_open_w3,
+       COUNT(DISTINCT(CASE WHEN reading_date <= date_add('week', 3, first_payment_date) 
+             AND reading_date > date_add('week', 2, first_payment_date)THEN book_id ELSE NULL END)) AS unique_book_open_w3,
+       SUM(CASE WHEN reading_date <= date_add('week', 3, first_payment_date)
+           AND reading_date > date_add('week', 2, first_payment_date)THEN reading_duration_minutes ELSE 0 END) AS mins_read_w3
+
+FROM Summarised_Payment_Table AS sp 
+LEFT JOIN analytics_reporting.reading_activity_daily as rd ON rd.user_id = sp.user_id 
+GROUP BY sp.user_id, first_payment_date, first_payment_discount, payments, gbp_amount,                  first_payment_failures
+),
+
+/* add in fix to address issue of user cancellation date not coming through in the subscriptions table - will use event tracking instead */
+
+event_tracking_cancellation_date AS (
+SELECT ra.user_id, 
+       MIN(record_date) as tracking_cancellation_date,
+       1 AS cancelled_within_m1 
+FROM Reading_Activity as ra  
+LEFT JOIN event_tracking as e on ra.user_id = e.user_id
+WHERE event_name = 'subscription cancellation'
+AND record_date <= date_add('month', 1, first_payment_date)
+AND record_date > first_payment_date
+GROUP BY ra.user_id)
+
+/* final reporting table */
+
+SELECT ra.user_id,
+       first_payment_date,
+       first_payment_discount,
+       coalesce(first_payment_failures,0) AS first_payment_failures,
+       payments, 
+       gbp_amount,
+       book_open_w1_trial,
+       unique_book_open_w1_trial,
+       mins_read_w1_trial,
+       book_open_w1,
+       unique_book_open_w1,
+       mins_read_w1,
+       book_open_w2,
+       unique_book_open_w2,
+       mins_read_w2,
+       book_open_w3,
+       unique_book_open_w3,
+       mins_read_w3,
+       coalesce(cancelled_within_m1,0) as cancelled_within_m1,
+       CASE WHEN gbp_amount > 50 AND payments = 1 THEN 1 ELSE 0 END as think_monthly 
+FROM Reading_Activity AS ra 
+LEFT JOIN event_tracking_cancellation_date as et ON et.user_id = ra.user_id
+
+
+
