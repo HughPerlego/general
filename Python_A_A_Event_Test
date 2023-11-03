@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Wed Oct 25 13:02:04 2023
+
+@author: hughwaters
+"""
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Thu May  4 17:07:38 2023
+
+@author: hughwaters
+"""
+
+import os 
+os.chdir('/Users/hughwaters/Desktop/Per Experinemnts/A:A Test/AA/event_subscription_check')
+
+import pandas as pd
+import datetime
+
+
+# Read the Parquet files into a pandas DataFrame
+
+location_file = '/Users/hughwaters/Desktop/Per Experinemnts/A:A Test/AA/event_subscription_check/'
+
+import glob
+parquet_files = glob.glob(location_file + '*.parquet')
+dataframes = []
+
+for file in parquet_files:
+    df_pre = pd.read_parquet(file)
+    dataframes.append(df_pre)
+
+df = pd.concat(dataframes, ignore_index=True)
+
+# initial check 
+
+# Print the contents of the DataFrame & check for null / duplicated values 
+
+df.dtypes
+df.head(5)
+df.columns
+
+df.isnull().sum()
+
+# Select relevant fields for the experiment 
+
+import numpy as np
+
+df['record_timestamp'] = df['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
+df['timestamp_2'] = pd.to_datetime(df['record_timestamp'])
+
+df= df[['uuid', 'record_timestamp' ,'visitor_id']]
+df.to_csv('optimizely_visitors_data_a_a_sub_convert.csv', index=False, header= False)
+
+
+df_filtered.columns
+
+
