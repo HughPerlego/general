@@ -1,0 +1,198 @@
+/* remove duplicates at visitor id level assuming experinment & variation is the same  */
+WITH Grouped_Optimizely_File_A_A AS (
+
+SELECT visitor_id, experiment_id, 'A/A Test' AS experiment_name, variation_id, 
+       CASE WHEN variation_id = '25907790257' THEN 'Control'
+            WHEN variation_id = '25874800225' THEN 'Variation' ELSE NULL END AS variation_name,
+       MIN(record_timestamp) as first_event_time,
+       MAX(record_timestamp) as last_event_time
+FROM reference_tables.optimizely_visitors_a_a
+GROUP BY visitor_id, experiment_id, variation_id, 
+         CASE WHEN variation_id = '25907790257' THEN 'Control'
+              WHEN variation_id = '25874800225' THEN 'Variation' ELSE NULL END
+),
+
+/* Identify the first time we record the optimizely cookie in the tracking service. For those that appear in the subscription conversion event file.  */
+First_Cookie_Time AS (
+SELECT *
+FROM (
+SELECT DISTINCT 
+       try(cast(json_extract(third_party_ids, '$.optimizely_cookie') as varchar)) as cookie_id, 
+       event_name as first_event_name_tracking, 
+       current_url as first_url_tracking,
+       referrer_url as first_referrer_url_tracking,
+       record_date as first_record_date_tracking,
+       page_title as first_page_title_tracking, 
+       geo_location as first_geo_location,
+       CASE WHEN user_agent LIKE '%Chrome/%' AND user_agent NOT LIKE '%Chromium/%' AND user_agent NOT LIKE '%Edg.*/%' THEN SUBSTR(user_agent, strpos(user_agent, 'Chrome'), 16) 
+        WHEN user_agent LIKE '%Firefox/%' AND user_agent NOT LIKE '%Seamonkey/%' 
+                 THEN SUBSTR(user_agent, strpos(user_agent, 'Firefox'), 16) 
+          WHEN user_agent LIKE '%Safari/%' AND user_agent NOT LIKE '%Chrome/%' AND user_agent NOT LIKE '%Chromium/%' THEN SUBSTR(user_agent, strpos(user_agent, 'Safari'), 16) 
+              ELSE 'Other' END AS browser_tracking,
+              
+        CASE when user_agent like '%Windows%' or user_agent LIKE '%Macintosh%' then 'Web Desktop'
+             when user_agent like '%Android%' or user_agent LIKE '%Linux%' or user_agent LIKE '%iPhone%' THEN 'Web Phone'
+             when user_agent like '%iPad%' or user_agent LIKE '%X11%' THEN 'Web Tablet' else null end as device_type_tracking,
+             
+       ROW_NUMBER() OVER (PARTITION BY try(cast(json_extract(third_party_ids, '$.optimizely_cookie') as varchar)) ORDER BY record_date asc) as row_rank
+FROM prod_gold_bucket_database.event_tracking 
+WHERE try(cast(json_extract(third_party_ids, '$.optimizely_cookie') as varchar)) IN (SELECT visitor_id FROM reference_tables.optimizely_visitors_a_a_sub_convert)
+) WHERE  row_rank = 1 
+),
+
+/* From base reference table join to grouped A/A decesions file & first event tracking table to identify which visitors are not in the conversion file. Joined to tracking to see if there is any key similarities amongst missing visitors.  */
+Reference_Tables_Compared AS (
+SELECT sub.*,
+       first_event_name_tracking,
+       first_url_tracking,
+       first_referrer_url_tracking,
+       first_record_date_tracking,
+       first_page_title_tracking,
+       first_geo_location,
+       browser_tracking,
+       device_type_tracking,
+       experiment_id,
+       experiment_name,
+       variation_id,
+       variation_name,
+       from_unixtime(cast(substr(sub.visitor_id, 4, 13) as bigint)/ 1000e0) as converted_visitor_cookie_timestamp  
+FROM reference_tables.optimizely_visitors_a_a_sub_convert as sub 
+LEFT JOIN Grouped_Optimizely_File_A_A ON Grouped_Optimizely_File_A_A.visitor_id = sub.visitor_id
+LEFT JOIN First_Cookie_Time ON First_Cookie_Time.cookie_id = sub.visitor_id
+),
+
+/* Find user inforamtion for visitors in event file */
+Users_Found AS (
+SELECT *
+FROM (
+SELECT TRY(CAST(JSON_EXTRACT(third_party_ids, '$.optimizely_cookie') as varchar)) as cookie,
+       record_date, 
+       user_id,
+       ROW_NUMBER() OVER (PARTITION BY TRY(CAST(JSON_EXTRACT(third_party_ids, '$.optimizely_cookie') as varchar)) ORDER BY record_date) as row_rank
+FROM prod_gold_bucket_database.event_tracking
+WHERE TRY(CAST(JSON_EXTRACT(third_party_ids, '$.optimizely_cookie') as varchar)) IN 
+(SELECT visitor_id FROM Reference_Tables_Compared)
+AND user_id IS NOT NULL 
+) WHERE row_rank = 1),
+
+/* find subscribers and mark users who signup via per 3.5 - so they should have only signed up to one of the approved UK / US plans */
+user_Sub_join AS (
+SELECT Users_Found.*, 
+       src_sub_category_id,
+       start_timestamp,
+       end_timestamp,
+       total_paid_gbp
+        
+FROM Users_Found
+LEFT JOIN analytics_reporting.subscriptions as s ON s.user_id = Users_Found.user_id 
+WHERE subscription_type = 'subscribed'
+AND src_sub_category_id IN ('price_1Kt9EZLmu5QiBx4Bgk7I2HLw', 'price_1Kt9FWLmu5QiBx4BFLFLFzPc',                            'price_1KTOPmLmu5QiBx4Bwnge2GIQ', 'price_1KTOQGLmu5QiBx4BFiRo8kdY')),
+
+Subscriptions_reference_joined AS (
+SELECT *, 'In conversion File' AS subscription_status
+FROM Reference_Tables_Compared
+LEFT JOIN user_Sub_join ON user_Sub_join.cookie = Reference_Tables_Compared.visitor_id),
+
+/* find subscribers not in conversion file that subscribed with these plans from 17th - 22nd */
+
+subs_not_in_file as (
+SELECT user_id as sub_user_id, src_sub_category_id, start_timestamp, end_timestamp, total_paid_gbp, 'Not In Conversion File' AS subscription_status
+FROM analytics_reporting.subscriptions 
+where user_id not in (select user_id from Subscriptions_reference_joined where user_id is not null)
+and src_sub_category_id in ('price_1Kt9EZLmu5QiBx4Bgk7I2HLw', 'price_1Kt9FWLmu5QiBx4BFLFLFzPc',                            'price_1KTOPmLmu5QiBx4Bwnge2GIQ', 'price_1KTOQGLmu5QiBx4BFiRo8kdY')
+and start_timestamp >= cast('2023-10-17' as date) and start_timestamp <= cast('2023-10-23' as date)
+and subscription_type = 'subscribed'),
+
+/* find first event tracking file associated with subscribers on relevant plans who are not in the optimizely event file. As these users should be in the file according to the A/A experinment */
+event_tracking_non_file_subs AS (
+SELECT *,
+       NULL as experiment_id,
+       NULL as experiment_name,
+       NULL as variation_id,
+       NULL as variation_name,
+       from_unixtime(cast(substr(visitor_id, 4, 13) as bigint)/ 1000e0) as converted_visitor_cookie_timestamp
+FROM (
+SELECT NULL as uuid,
+       record_date as record_timestamp,
+       TRY(CAST(JSON_EXTRACT(third_party_ids, '$.optimizely_cookie') as varchar)) as visitor_id,
+       event_name as first_event_name_tracking, 
+        current_url as first_url_tracking,
+       referrer_url as first_referrer_url_tracking,
+       record_date as first_record_date_tracking,
+       page_title as first_page_title_tracking, 
+       geo_location as first_geo_location,
+       
+       CASE WHEN user_agent LIKE '%Chrome/%' AND user_agent NOT LIKE '%Chromium/%' AND user_agent NOT LIKE '%Edg.*/%' THEN SUBSTR(user_agent, strpos(user_agent, 'Chrome'), 16) 
+        WHEN user_agent LIKE '%Firefox/%' AND user_agent NOT LIKE '%Seamonkey/%' 
+                 THEN SUBSTR(user_agent, strpos(user_agent, 'Firefox'), 16) 
+          WHEN user_agent LIKE '%Safari/%' AND user_agent NOT LIKE '%Chrome/%' AND user_agent NOT LIKE '%Chromium/%' THEN SUBSTR(user_agent, strpos(user_agent, 'Safari'), 16) 
+              ELSE 'Other' END AS browser_tracking,
+              
+        CASE when user_agent like '%Windows%' or user_agent LIKE '%Macintosh%' then 'Web Desktop'
+             when user_agent like '%Android%' or user_agent LIKE '%Linux%' or user_agent LIKE '%iPhone%' THEN 'Web Phone'
+             when user_agent like '%iPad%' or user_agent LIKE '%X11%' THEN 'Web Tablet' else null end as device_type_tracking,
+             
+       ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY record_date) as row_rank,
+       user_id
+FROM prod_gold_bucket_database.event_tracking
+WHERE user_id IN (SELECT sub_user_id from subs_not_in_file)
+AND TRY(CAST(JSON_EXTRACT(third_party_ids, '$.optimizely_cookie') as varchar)) is not null 
+)
+WHERE row_rank = 1),
+
+/* Join subscriber & tracking information for missing visitors  */
+non_file_users_sub_table_combined as (
+SELECT event_tracking_non_file_subs.*,
+       subs_not_in_file.*
+FROM event_tracking_non_file_subs
+LEFT JOIN subs_not_in_file ON subs_not_in_file.sub_user_id = event_tracking_non_file_subs.user_id)
+
+/* append non conversion file visitors to main conversion file  */
+
+SELECT uuid,
+       record_timestamp,
+       visitor_id,
+       first_event_name_tracking,
+       first_url_tracking,
+       first_referrer_url_tracking,
+       first_record_date_tracking,
+       first_page_title_tracking,
+       first_geo_location,
+       browser_tracking,
+       device_type_tracking,
+       experiment_id,
+       experiment_name,
+       variation_id,
+       variation_name,
+       converted_visitor_cookie_timestamp,
+       user_id,
+       src_sub_category_id,
+       start_timestamp,
+       end_timestamp,
+       total_paid_gbp,
+       subscription_status
+FROM Subscriptions_reference_joined
+UNION ALL 
+SELECT uuid,
+       record_timestamp,
+       visitor_id,
+       first_event_name_tracking,
+       first_url_tracking,
+       first_referrer_url_tracking,
+       first_record_date_tracking,
+       first_page_title_tracking,
+       first_geo_location,
+       browser_tracking,
+       device_type_tracking,
+       experiment_id,
+       experiment_name,
+       variation_id,
+       variation_name,
+       converted_visitor_cookie_timestamp,
+       sub_user_id as user_id,
+       src_sub_category_id,
+       start_timestamp,
+       end_timestamp,
+       total_paid_gbp,
+       subscription_status
+FROM non_file_users_sub_table_combined
