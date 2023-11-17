@@ -1,0 +1,160 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Sun Oct  8 13:15:20 2023
+
+@author: hughwaters
+"""
+
+import os 
+os.chdir('/Users/hughwaters/Desktop/Data Felloweship/EPA/Python')
+
+import pandas as pd 
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_squared_error
+import matplotlib.pyplot as plt
+import numpy as np 
+import statsmodels.api as sm
+from sklearn.metrics import mean_absolute_error
+
+# import data
+
+df = pd.read_csv('Data_12.csv')
+
+# data quality checks 
+
+df.head(5)
+df.columns
+df.dtypes
+
+df.set_index('user_id', inplace=True)
+
+# create new columns 
+
+df['book_open_diff_trial_w1'] = df['book_open_w1'] - df['book_open_w1_trial'] 
+df['book_open_diff_w1_w2'] = df['book_open_w2'] - df['book_open_w1'] 
+df['book_open_diff_w2_w3'] = df['book_open_w3'] - df['book_open_w2'] 
+
+df['unique_books_diff_trial_w1'] = df['unique_book_open_w1'] - df['unique_book_open_w1_trial'] 
+df['unique_books_diff_w1_w2'] = df['unique_book_open_w2'] - df['unique_book_open_w1'] 
+df['unique_books_diff_w2_w3'] = df['unique_book_open_w3'] - df['unique_book_open_w2'] 
+
+df['mins_read_diff_trial_w1'] = df['mins_read_w1'] - df['mins_read_w1_trial'] 
+df['bmins_read_diff_w1_w2'] = df['mins_read_w2'] - df['mins_read_w1'] 
+df['mins_read_diff_w2_w3'] = df['mins_read_w3'] - df['mins_read_w2'] 
+
+dummies_persona = pd.get_dummies(df['user_persona'], prefix='persona')
+df = pd.concat([df, dummies_persona], axis=1)
+
+dummies_signup= pd.get_dummies(df['first_payment_quarter'], prefix='signup_quarter')
+df = pd.concat([df, dummies_signup], axis=1)
+
+dummies_utm= pd.get_dummies(df['utm_medium_grouped'], prefix='utm')
+df = pd.concat([df, dummies_utm], axis=1)
+
+df['mins_read_diff_trial_w1_square'] = df['mins_read_diff_trial_w1']**2
+
+dummies_card_brand= pd.get_dummies(df['first_card_brand'], prefix='card_brand')
+df = pd.concat([df, dummies_card_brand], axis=1)
+
+dummies_card_funding= pd.get_dummies(df['first_card_funding'], prefix='card_funding')
+df = pd.concat([df, dummies_card_funding], axis=1)
+
+
+df.columns
+
+# filter data 
+
+df = df[df['think_monthly'] == 0]
+
+df_reg = df[['gbp_amount', 'signup_quarter_1', 'signup_quarter_2', 'signup_quarter_3',  
+            'first_payment_failures', 'cancelled_within_m1', 'book_open_w1_trial', 'mins_read_w1_trial',
+            'book_open_diff_w1_w2','book_open_diff_w2_w3', 'mins_read_diff_trial_w1_square',
+             'bmins_read_diff_w1_w2', 'mins_read_diff_w2_w3',
+            'persona_Student', 'utm_cpc', 'utm_organic', 'card_funding_credit',
+            'card_funding_debit', 'card_funding_prepaid']]
+
+# basic regression 
+
+# Split data into training and test sets
+y = df_reg[['gbp_amount']]
+X = df_reg[['signup_quarter_1', 'signup_quarter_2', 'signup_quarter_3',  
+            'first_payment_failures', 'cancelled_within_m1', 'book_open_w1_trial', 'mins_read_w1_trial',
+            'book_open_diff_w1_w2','book_open_diff_w2_w3', 'mins_read_diff_trial_w1_square',
+            'bmins_read_diff_w1_w2', 'mins_read_diff_w2_w3',
+            'persona_Student', 'utm_cpc', 'utm_organic', 'card_funding_credit', 
+            'card_funding_debit', 'card_funding_prepaid']]
+
+X = sm.add_constant(X)
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+model = LinearRegression()
+
+model.fit(X_train, y_train)
+
+# create and adjust predictions so that lowest value is their first payment value
+
+y_pred = model.predict(X_test)
+y_pred = np.maximum(y_pred, 12)
+y_pred = np.minimum(y_pred, 144)
+y_pred_flat_array = y_pred.flatten()
+y_pred_series = pd.Series(y_pred_flat_array, index=X_test.index, name='Predictions')
+
+
+# accuracy metrics 
+
+mse = mean_squared_error(y_test, y_pred)
+rmse = np.sqrt(mse)
+mae = mean_absolute_error(y_test, y_pred)
+
+print(f"Mean Squared Error: {mse}")
+print(f"Mean Squared Error: {rmse}")
+print(f"Mean Absolute Error: {mae}")
+
+
+# summary 
+
+model = sm.OLS(y, X).fit()
+print(model.summary())
+
+# export comparison 
+
+y_predict_compare = pd.concat([y_pred_series, y_test], axis=1)
+
+# Save to CSV
+y_predict_compare.to_csv('y_predict_compare.csv', index=True)
+
+################################### model disagnoistcs 
+
+#multi collinarity
+from statsmodels.stats.outliers_influence import variance_inflation_factor
+
+vif_data = pd.DataFrame()
+vif_data["feature"] = X_train.columns
+vif_data["VIF"] = [variance_inflation_factor(X_train.values, i) for i in range(X.shape[1])]
+
+# 
+
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+correlation_matrix = df[['signup_quarter_1', 'signup_quarter_2', 'signup_quarter_3',  
+                         'first_payment_failures', 'cancelled_within_m1',
+                         'book_open_w1_trial', 'mins_read_w1_trial',
+                         'book_open_diff_trial_w1', 'book_open_diff_w1_w2','book_open_diff_w2_w3',
+                         'mins_read_diff_trial_w1', 'bmins_read_diff_w1_w2', 'mins_read_diff_w2_w3',
+                         'persona_Student', 'persona_Other', 'utm_cpc', 'utm_organic']].corr()
+print(correlation_matrix)
+
+f, ax = plt.subplots(figsize=(10, 8))
+sns.heatmap(correlation_matrix, annot=True, fmt=".2f", 
+            linewidths=.5, cmap='coolwarm', cbar_kws={"shrink": .5}, ax=ax)
+
+# Show plot
+plt.show()
+
+# Multivariate analysis: Pair plot for multiple numerical variables
+sns.pairplot(df[['mins_read_w1_trial', 'book_open_diff_trial_w1', 'gbp_amount']])
+plt.show()
