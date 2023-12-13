@@ -1,0 +1,295 @@
+/* Query for CORE, NORTHAM, EU-LATAM & ROW */
+
+WITH d2c_movements AS (
+    SELECT perlego_reporting_layer.prod.fct__d2c_mrr.*, movement_type, reporting_date
+    FROM perlego_reporting_layer.prod.fct__d2c_mrr
+),
+
+users AS (
+    SELECT *, CASE WHEN utm_medium IN ('organic', 'direct') THEN utm_medium ELSE 'cpc' END AS utm_medium_group FROM perlego_reporting_layer.prod.dim__users
+),
+
+countries AS (
+    SELECT * FROM perlego_reporting_layer.prod.dim__country_regions
+    
+),
+
+MRR_Churn_Calculation AS (
+SELECT DATE_TRUNC('month', reporting_date) AS Reporting_Month,
+       month_until_churn,
+       plan_group,
+       countries.market,
+       SUM(mrr_value_gbp) AS GBP_MRR_Month_Churn
+FROM d2c_movements
+LEFT JOIN users ON users.user_id = d2c_movements.user_id
+INNER JOIN countries ON countries.country_id = users.acquisition_country_id
+WHERE d2c_movements.movement_type = '1. new'
+GROUP BY DATE_TRUNC('month', reporting_date),
+       month_until_churn,
+       plan_group,
+       countries.market), 
+
+
+Base_D2C_Movement_Table AS (
+SELECT DATE_TRUNC('month', reporting_date) AS Reporting_Month,
+       plan_group,
+       countries.market,
+       SUM(mrr_value_gbp) AS Reporting_Start_MRR 
+FROM d2c_movements
+LEFT JOIN users ON users.user_id = d2c_movements.user_id
+INNER JOIN countries ON countries.country_id = users.acquisition_country_id
+WHERE d2c_movements.movement_type = '1. new'
+GROUP BY DATE_TRUNC('month', reporting_date),
+       plan_group,
+       countries.market
+),
+
+Reporting_Table AS (
+
+SELECT *
+FROM (
+SELECT *, 
+        SUM(GBP_MRR_Month_Churn) OVER (PARTITION BY Reporting_Month, plan_group, market 
+                                 ORDER BY reporting_months ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW ) AS Cummulative_Churn,
+        
+        Reporting_Start_MRR - SUM(GBP_MRR_Month_Churn) OVER (PARTITION BY Reporting_Month, plan_group, market 
+                                 ORDER BY reporting_months ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW ) AS Retained_MRR,
+
+        add_months(Reporting_Month, reporting_months) AS Reporting_month_add_cohort_months  
+
+FROM (
+SELECT Reporting_Table.*, coalesce(GBP_MRR_Month_Churn, 0) AS GBP_MRR_Month_Churn
+FROM (
+SELECT t1.n AS reporting_months, Base_D2C_Movement_Table.*
+FROM
+  (VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9), (10), (11), (12), (13),(14),(15),
+          (16),(17),(18),(19),(20),(21),
+          (22),(23),(24),(25),(26),(27),(28),(29),(30),(31),
+          (32),(33),(34),(35),(36),(37),(38),(39),(40),(41),
+          (42),(43),(44),(45),(46),(47),(48),(49)) AS t1(n)
+JOIN Base_D2C_Movement_Table) AS Reporting_Table 
+LEFT JOIN MRR_Churn_Calculation ON (MRR_Churn_Calculation.Reporting_Month = Reporting_Table.Reporting_Month AND 
+                                    MRR_Churn_Calculation.plan_group = Reporting_Table.plan_group AND 
+                                    MRR_Churn_Calculation.market = Reporting_Table.market AND 
+                                    MRR_Churn_Calculation.month_until_churn = Reporting_Table.reporting_months)
+)
+ORDER BY Reporting_Month, plan_group, market, reporting_months
+) WHERE Reporting_month_add_cohort_months < current_date 
+)
+
+SELECT * FROM (
+  SELECT market, Reporting_Month, Retained_MRR, reporting_months
+  FROM Reporting_Table
+)
+PIVOT (
+  SUM(Retained_MRR) FOR reporting_months IN (0 AS month_0, 1 AS month_1, 2 AS month_2, 3 AS month_3, 4 AS month_4, 5 AS month_5,
+                                                    6 AS month_6, 7 AS month_7, 8 AS month_8, 9 AS month_9, 10 AS month_10, 11 AS month_11,
+                                                    12 AS month_12, 13 AS month_13, 14 AS month_14, 15 AS month_15, 16 AS month_16,
+                                                    17 AS month_17, 18 AS month_18, 19 AS month_19, 20 AS month_20, 21 AS month_21,
+                                                    22 AS month_22, 23 AS month_23, 24 AS month_24, 25 AS month_25, 26 AS month_26,
+                                                    27 AS month_27, 28 AS month_28, 29 AS month_29, 30 AS month_30, 31 AS month_31,
+                                                    32 AS month_32, 33 AS month_33, 34 AS month_34, 35 AS month_35, 36 AS month_36,
+                                                    37 AS month_37, 38 AS month_38, 39 AS month_39, 40 AS month_40, 41 AS month_41,
+                                                    42 AS month_42, 43 AS month_43, 44 AS month_44, 45 AS month_45)
+) ORDER BY market, reporting_month 
+
+----------------------------------------------------------------------------------------------------------------------
+
+/* Query for specific markets e.g. franc , italy etc */
+
+WITH d2c_movements AS (
+    SELECT perlego_reporting_layer.prod.fct__d2c_mrr.*, movement_type, reporting_date
+    FROM perlego_reporting_layer.prod.fct__d2c_mrr 
+),
+
+users AS (
+    SELECT *, CASE WHEN utm_medium IN ('organic', 'direct') THEN utm_medium ELSE 'cpc' END AS utm_medium_group FROM perlego_reporting_layer.prod.dim__users
+),
+
+countries AS (
+        SELECT country_id, CASE WHEN country_code_2 in ('AR', 'BO', 'BZ', 'CL', 'CO', 'CR', 'CU', 'DO', 'EC', 'GT', 'HN', 'NI','PA',
+                                        'PE','PR','PY','SV','UY','VE', 'MX') then 'Hispanic LATAM' else region end as region_report
+    FROM perlego_reporting_layer.prod.dim__country_regions
+    WHERE (region IN ('ANZ', 'BENELUX', 'Brazil', 'British Isles', 'CEE', 'DACH', 'France', 'Greece', 'Hispanic LATAM', 'Italy', 'Nordics', 'Portugal', 'South Africa', 'Spain','EUROPE','LATAM') or 
+    country_code_2 in ('AR', 'BO', 'BZ', 'CL', 'CO', 'CR', 'CU', 'DO', 'EC', 'GT', 'HN', 'NI','PA',
+                                        'PE','PR','PY','SV','UY','VE', 'MX'))
+),
+
+MRR_Churn_Calculation AS (
+SELECT DATE_TRUNC('month', reporting_date) AS Reporting_Month,
+       month_until_churn,
+       plan_group,
+       countries.region_report,
+       SUM(mrr_value_gbp) AS GBP_MRR_Month_Churn
+FROM d2c_movements
+LEFT JOIN users ON users.user_id = d2c_movements.user_id
+INNER JOIN countries ON countries.country_id = users.acquisition_country_id
+WHERE d2c_movements.movement_type = '1. new'
+GROUP BY DATE_TRUNC('month', reporting_date),
+       month_until_churn,
+       plan_group,
+       countries.region_report), 
+
+
+Base_D2C_Movement_Table AS (
+SELECT DATE_TRUNC('month', reporting_date) AS Reporting_Month,
+       plan_group,
+       countries.region_report,
+       SUM(mrr_value_gbp) AS Reporting_Start_MRR 
+FROM d2c_movements
+LEFT JOIN users ON users.user_id = d2c_movements.user_id
+INNER JOIN countries ON countries.country_id = users.acquisition_country_id
+WHERE d2c_movements.movement_type = '1. new'
+GROUP BY DATE_TRUNC('month', reporting_date),
+       plan_group,
+       countries.region_report
+),
+
+Reporting_Table AS (
+
+SELECT *
+FROM (
+SELECT *, 
+        SUM(GBP_MRR_Month_Churn) OVER (PARTITION BY Reporting_Month, plan_group, region_report 
+                                 ORDER BY reporting_months ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW ) AS Cummulative_Churn,
+        
+        Reporting_Start_MRR - SUM(GBP_MRR_Month_Churn) OVER (PARTITION BY Reporting_Month, plan_group, region_report 
+                                 ORDER BY reporting_months ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW ) AS Retained_MRR,
+
+        add_months(Reporting_Month, reporting_months) AS Reporting_month_add_cohort_months  
+
+FROM (
+SELECT Reporting_Table.*, coalesce(GBP_MRR_Month_Churn, 0) AS GBP_MRR_Month_Churn
+FROM (
+SELECT t1.n AS reporting_months, Base_D2C_Movement_Table.*
+FROM
+  (VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9), (10), (11), (12), (13),(14),(15),
+          (16),(17),(18),(19),(20),(21),
+          (22),(23),(24),(25),(26),(27),(28),(29),(30),(31),
+          (32),(33),(34),(35),(36),(37),(38),(39),(40),(41),
+          (42),(43),(44),(45),(46),(47),(48),(49)) AS t1(n)
+JOIN Base_D2C_Movement_Table) AS Reporting_Table 
+LEFT JOIN MRR_Churn_Calculation ON (MRR_Churn_Calculation.Reporting_Month = Reporting_Table.Reporting_Month AND 
+                                    MRR_Churn_Calculation.plan_group = Reporting_Table.plan_group AND 
+                                    MRR_Churn_Calculation.region_report = Reporting_Table.region_report AND 
+                                    MRR_Churn_Calculation.month_until_churn = Reporting_Table.reporting_months)
+)
+ORDER BY Reporting_Month, plan_group, region_report, reporting_months
+) WHERE Reporting_month_add_cohort_months < current_date 
+)
+
+SELECT * FROM (
+  SELECT region_report, Reporting_Month, Retained_MRR, reporting_months
+  FROM Reporting_Table
+)
+PIVOT (
+  SUM(Retained_MRR) FOR reporting_months IN (0 AS month_0, 1 AS month_1, 2 AS month_2, 3 AS month_3, 4 AS month_4, 5 AS month_5,
+                                                    6 AS month_6, 7 AS month_7, 8 AS month_8, 9 AS month_9, 10 AS month_10, 11 AS month_11,
+                                                    12 AS month_12, 13 AS month_13, 14 AS month_14, 15 AS month_15, 16 AS month_16,
+                                                    17 AS month_17, 18 AS month_18, 19 AS month_19, 20 AS month_20, 21 AS month_21,
+                                                    22 AS month_22, 23 AS month_23, 24 AS month_24, 25 AS month_25, 26 AS month_26,
+                                                    27 AS month_27, 28 AS month_28, 29 AS month_29, 30 AS month_30, 31 AS month_31,
+                                                    32 AS month_32, 33 AS month_33, 34 AS month_34, 35 AS month_35, 36 AS month_36,
+                                                    37 AS month_37, 38 AS month_38, 39 AS month_39, 40 AS month_40, 41 AS month_41,
+                                                    42 AS month_42, 43 AS month_43, 44 AS month_44, 45 AS month_45)
+) ORDER BY region_report, reporting_month 
+
+-------------------------------------------------------------------------------------------
+
+/* Query for Europe & LATAM continents */
+
+WITH d2c_movements AS (
+    SELECT perlego_reporting_layer.prod.fct__d2c_mrr.*, movement_type, reporting_date
+    FROM perlego_reporting_layer.prod.fct__d2c_mrr
+),
+
+users AS (
+    SELECT *, CASE WHEN utm_medium IN ('organic', 'direct') THEN utm_medium ELSE 'cpc' END AS utm_medium_group FROM perlego_reporting_layer.prod.dim__users
+),
+
+countries AS (
+    SELECT *, CASE WHEN continent ='Europe' THEN 'Europe' ELSE 'LATAM' end as continent_report FROM perlego_reporting_layer.prod.dim__country_regions
+    WHERE market = '3. EUROPE-LATAM'
+),
+
+MRR_Churn_Calculation AS (
+SELECT DATE_TRUNC('month', reporting_date) AS Reporting_Month,
+       month_until_churn,
+       plan_group,
+       countries.continent_report,
+       SUM(mrr_value_gbp) AS GBP_MRR_Month_Churn
+FROM d2c_movements
+LEFT JOIN users ON users.user_id = d2c_movements.user_id
+INNER JOIN countries ON countries.country_id = users.acquisition_country_id
+WHERE d2c_movements.movement_type = '1. new'
+GROUP BY DATE_TRUNC('month', reporting_date),
+       month_until_churn,
+       plan_group,
+       countries.continent_report), 
+
+
+Base_D2C_Movement_Table AS (
+SELECT DATE_TRUNC('month', reporting_date) AS Reporting_Month,
+       plan_group,
+       countries.continent_report,
+       SUM(mrr_value_gbp) AS Reporting_Start_MRR 
+FROM d2c_movements
+LEFT JOIN users ON users.user_id = d2c_movements.user_id
+INNER JOIN countries ON countries.country_id = users.acquisition_country_id
+WHERE d2c_movements.movement_type = '1. new'
+GROUP BY DATE_TRUNC('month', reporting_date),
+       plan_group,
+       countries.continent_report
+),
+
+Reporting_Table AS (
+
+SELECT *
+FROM (
+SELECT *, 
+        SUM(GBP_MRR_Month_Churn) OVER (PARTITION BY Reporting_Month, plan_group, continent_report 
+                                 ORDER BY reporting_months ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW ) AS Cummulative_Churn,
+        
+        Reporting_Start_MRR - SUM(GBP_MRR_Month_Churn) OVER (PARTITION BY Reporting_Month, plan_group, continent_report 
+                                 ORDER BY reporting_months ASC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW ) AS Retained_MRR,
+
+        add_months(Reporting_Month, reporting_months) AS Reporting_month_add_cohort_months  
+
+FROM (
+SELECT Reporting_Table.*, coalesce(GBP_MRR_Month_Churn, 0) AS GBP_MRR_Month_Churn
+FROM (
+SELECT t1.n AS reporting_months, Base_D2C_Movement_Table.*
+FROM
+  (VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9), (10), (11), (12), (13),(14),(15),
+          (16),(17),(18),(19),(20),(21),
+          (22),(23),(24),(25),(26),(27),(28),(29),(30),(31),
+          (32),(33),(34),(35),(36),(37),(38),(39),(40),(41),
+          (42),(43),(44),(45),(46),(47),(48),(49)) AS t1(n)
+JOIN Base_D2C_Movement_Table) AS Reporting_Table 
+LEFT JOIN MRR_Churn_Calculation ON (MRR_Churn_Calculation.Reporting_Month = Reporting_Table.Reporting_Month AND 
+                                    MRR_Churn_Calculation.plan_group = Reporting_Table.plan_group AND 
+                                    MRR_Churn_Calculation.continent_report = Reporting_Table.continent_report AND 
+                                    MRR_Churn_Calculation.month_until_churn = Reporting_Table.reporting_months)
+)
+ORDER BY Reporting_Month, plan_group, continent_report, reporting_months
+) WHERE Reporting_month_add_cohort_months < current_date 
+)
+
+SELECT * FROM (
+  SELECT continent_report, Reporting_Month, Retained_MRR, reporting_months
+  FROM Reporting_Table
+)
+PIVOT (
+  SUM(Retained_MRR) FOR reporting_months IN (0 AS month_0, 1 AS month_1, 2 AS month_2, 3 AS month_3, 4 AS month_4, 5 AS month_5,
+                                                    6 AS month_6, 7 AS month_7, 8 AS month_8, 9 AS month_9, 10 AS month_10, 11 AS month_11,
+                                                    12 AS month_12, 13 AS month_13, 14 AS month_14, 15 AS month_15, 16 AS month_16,
+                                                    17 AS month_17, 18 AS month_18, 19 AS month_19, 20 AS month_20, 21 AS month_21,
+                                                    22 AS month_22, 23 AS month_23, 24 AS month_24, 25 AS month_25, 26 AS month_26,
+                                                    27 AS month_27, 28 AS month_28, 29 AS month_29, 30 AS month_30, 31 AS month_31,
+                                                    32 AS month_32, 33 AS month_33, 34 AS month_34, 35 AS month_35, 36 AS month_36,
+                                                    37 AS month_37, 38 AS month_38, 39 AS month_39, 40 AS month_40, 41 AS month_41,
+                                                    42 AS month_42, 43 AS month_43, 44 AS month_44, 45 AS month_45)
+) ORDER BY continent_report, reporting_month 
+
+
+
