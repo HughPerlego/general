@@ -1,0 +1,23 @@
+WITH d2c_movements AS (
+    SELECT * FROM perlego_reporting_layer.prod.fct__d2c_mrr
+),
+
+users AS (
+    SELECT *, CASE WHEN utm_medium IN ('organic', 'direct') THEN utm_medium ELSE 'cpc' END AS utm_medium_group FROM perlego_reporting_layer.prod.dim__users
+),
+
+countries AS (
+    SELECT * FROM perlego_reporting_layer.prod.dim__country_regions
+)
+
+SELECT
+    movement_type, countries.market, users.utm_medium_group,
+    SUM(fct__d2c_mrr.mrr_value_gbp) as total_mrr,
+    MAX(fct__d2c_mrr.reporting_date) as last_date
+FROM perlego_reporting_layer.prod.fct__d2c_mrr
+LEFT JOIN users ON users.user_id = fct__d2c_mrr.user_id
+LEFT JOIN countries ON countries.country_id = users.acquisition_country_id
+WHERE
+    fct__d2c_mrr.reporting_date::DATE BETWEEN '2023-11-01'::DATE AND '2023-12-01'::DATE
+    AND movement_type IN ('4. churn', '3. contraction', '5. resubscribed', '2. expansion')
+GROUP BY 1, 2, 3
