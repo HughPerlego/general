@@ -1,0 +1,71 @@
+/* Total MRR by month for market e.g. CORE */
+WITH d2c_movements AS (
+    SELECT perlego_reporting_layer.prod.fct__d2c_mrr.*, movement_type, reporting_date
+    FROM perlego_reporting_layer.prod.fct__d2c_mrr
+),
+
+users AS (
+    SELECT *, CASE WHEN utm_medium IN ('organic', 'direct') THEN utm_medium ELSE 'cpc' END AS utm_medium_group FROM perlego_reporting_layer.prod.dim__users
+),
+
+countries AS (
+    SELECT * FROM perlego_reporting_layer.prod.dim__country_regions
+)
+
+SELECT
+    movement_type, 
+    countries.market, 
+    d2c_movements.movement_type,
+    users.utm_medium_group,
+    date_trunc('month', d2c_movements.reporting_date) AS reporting_month,
+    SUM(d2c_movements.mrr_value_gbp)
+FROM d2c_movements
+LEFT JOIN users ON users.user_id = d2c_movements.user_id
+LEFT JOIN countries ON countries.country_id = users.acquisition_country_id
+GROUP BY movement_type, 
+         countries.market, 
+         d2c_movements.movement_type,
+         users.utm_medium_group,
+          date_trunc('month', d2c_movements.reporting_date)
+
+   -----------
+
+WITH d2c_movements AS (
+    SELECT perlego_reporting_layer.prod.fct__d2c_mrr.*, movement_type, reporting_date
+    FROM perlego_reporting_layer.prod.fct__d2c_mrr
+),
+
+users AS (
+    SELECT *,  CASE WHEN utm_medium IN ('organic', 'direct') THEN utm_medium ELSE 'cpc' END AS utm_medium_group 
+    FROM perlego_reporting_layer.prod.dim__users 
+),
+
+countries AS (
+    SELECT *, case when  region in ('Hispanic LATAM exc Mexico', 'Mexico') then 'Hispanic LATAM' else region end as region_report,
+    CASE WHEN market = '3. EUROPE-LATAM' and continent ='Europe' THEN 'Europe' when market = '3. EUROPE-LATAM' and continent <> 'Europe' THEN 'LATAM' 
+    else NULL end as continent_report
+    FROM perlego_reporting_layer.prod.dim__country_regions
+     WHERE region IN ('ANZ', 'BENELUX', 'Brazil', 'British Isles', 'CEE', 'DACH', 
+                      'France', 'Greece', 'Hispanic LATAM exc Mexico', 'Mexico', 'Italy', 'Nordics', 'Portugal', 
+                      'South Africa', 'Spain', 'Canada', 'United States', 'USA')
+)
+
+
+SELECT
+    movement_type, 
+    countries.region_report, 
+    continent_report,
+    d2c_movements.movement_type,
+    users.utm_medium_group,
+    date_trunc('month', d2c_movements.reporting_date) AS reporting_month,
+    SUM(d2c_movements.mrr_value_gbp)
+FROM d2c_movements
+LEFT JOIN users ON users.user_id = d2c_movements.user_id
+INNER JOIN countries ON countries.country_id = users.acquisition_country_id
+GROUP BY movement_type, 
+         countries.region_report, 
+         continent_report,
+         d2c_movements.movement_type,
+         users.utm_medium_group,
+          date_trunc('month', d2c_movements.reporting_date)
+
