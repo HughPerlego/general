@@ -1,0 +1,378 @@
+setwd('/Users/hughwaters/Desktop/Activation - UGC')
+
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(stringr)
+
+Raw_Data <- read.csv('activation_bet_ugc_user_data.csv')
+
+
+# Explore -----------------------------------------------------------------
+
+# General baseline 
+
+explore_retention_by_cohort <- group_by(Raw_Data, subscription_start_month) %>%
+                               summarise(Total_m1_retained = sum(M1_retained), users = n()) %>%
+                               mutate(100.0*(Total_m1_retained) / users)
+
+# apply conditions found from exploratory analysis 
+
+Data <- filter(Raw_Data, ymd_hms(subscription_start_month) <= date("2024-01-01"))
+
+Data <- filter(Data, combined_academic_discipline == 'social science')
+
+# Explore Cleaned data  -----------------------------------------------------------
+
+# D1 Correlations 
+
+cor.test(Data$d1_books_read, Data$d1_highlight_created)
+cor.test(Data$d1_reading_mins, Data$d1_highlight_created)
+
+cor.test(Data$d1_books_read, Data$d1_annotation_made)
+cor.test(Data$d1_reading_mins, Data$d1_annotation_made)
+
+cor.test(Data$d1_books_read, Data$d1_bookmark)
+cor.test(Data$d1_reading_mins, Data$d1_bookmark)
+
+# D1 summary stats - highlights, annotations, bookmarks 
+
+summary(Data$d1_highlight_created)
+ggplot(Data, aes(d1_highlight_created))+geom_boxplot()
+summary(Data[Data$d1_highlight_created > 0,]$d1_highlight_created)
+
+summary(Data$d1_annotation_made)
+ggplot(Data, aes(d1_annotation_made))+geom_boxplot()
+summary(Data[Data$d1_annotation_made > 0,]$d1_annotation_made)
+
+summary(Data$d1_bookmark)
+ggplot(Data, aes(d1_bookmark))+geom_boxplot()
+summary(Data[Data$d1_bookmark > 0,]$d1_bookmark)
+
+# Apply capped columns ----------------------------------------------------
+
+ Data <- mutate(Data, d1_highlight_created_cap = ifelse(d1_highlight_created > 20, 20, d1_highlight_created),
+                      d1_annotation_made_cap = ifelse(d1_annotation_made > 10, 10, d1_annotation_made),
+                      d1_bookmark_cap = ifelse(d1_bookmark > 5, 5, d1_bookmark))
+
+quarter_1_data <- filter(Data, subscription_start_month >= "2023-01-01 00:00:00.000000" & subscription_start_month < "2023-04-01 00:00:00.000000")
+quarter_2_data <- filter(Data, subscription_start_month == "2023-04-01 00:00:00.000000" & subscription_start_month < "2023-07-01 00:00:00.000000")
+quarter_3_data <- filter(Data, subscription_start_month == "2023-07-01 00:00:00.000000" & subscription_start_month < "2023-10-01 00:00:00.000000")
+quarter_4_data <- filter(Data, subscription_start_month == "2023-10-01 00:00:00.000000" & subscription_start_month < "2024-01-01 00:00:00.000000")
+
+Data <- mutate(Data, 
+               Highlight_D1_binary = ifelse(d1_highlight_created > 0, 1, 0),
+               Highlight_W1_binary = ifelse(w1_highlight_created > 0, 1, 0),
+               Highlight_W2_binary = ifelse(w2_highlight_created > 0, 1, 0),
+               Highlight_W3_binary = ifelse(w3_highlight_created > 0, 1, 0),
+               Highlight_W4_binary = ifelse(w4_highlight_created > 0, 1, 0),
+               Highlight_M1_binary = ifelse(m1_highlight_created > 0, 1, 0))
+
+Data <- mutate(Data, 
+               Annotation_D1_binary = ifelse(d1_annotation_made > 0, 1, 0),
+               Annotation_W1_binary = ifelse(w1_annotation_made > 0, 1, 0),
+               Annotation_W2_binary = ifelse(w2_annotation_made > 0, 1, 0),
+               Annotation_W3_binary = ifelse(w3_annotation_made > 0, 1, 0),
+               Annotation_W4_binary = ifelse(w4_annotation_made > 0, 1, 0),
+               Annotation_M1_binary = ifelse(m1_annotation_made > 0, 1, 0))
+
+Data <- mutate(Data, 
+               Bookmark_D1_binary = ifelse(d1_bookmark > 0, 1, 0),
+               Bookmark_W1_binary = ifelse(w1_bookmark > 0, 1, 0),
+               Bookmark_W2_binary = ifelse(w2_bookmark > 0, 1, 0),
+               Bookmark_W3_binary = ifelse(w3_bookmark > 0, 1, 0),
+               Bookmark_W4_binary = ifelse(w4_bookmark > 0, 1, 0),
+               Bookmark_M1_binary = ifelse(m1_bookmark > 0, 1, 0))
+
+
+
+
+summary(Data$w4_highlight_created)
+
+
+# D1 Analyse  -------------------------------------------------------------
+
+# D1 highlights - M1 retention - regression 
+
+summary(glm(M1_retained ~ d1_highlight_created_cap, data = quarter_1_data))
+summary(glm(M1_retained ~ d1_highlight_created_cap + d1_books_read + d1_reading_mins, data = quarter_1_data))
+
+summary(glm(M1_retained ~ d1_highlight_created_cap, data = quarter_2_data))
+summary(glm(M1_retained ~ d1_highlight_created_cap + d1_books_read + d1_reading_mins, data = quarter_2_data))
+
+summary(glm(M1_retained ~ d1_highlight_created_cap, data = quarter_3_data))
+summary(glm(M1_retained ~ d1_highlight_created_cap + d1_books_read + d1_reading_mins, data = quarter_3_data))
+
+summary(glm(M1_retained ~ d1_highlight_created_cap, data = quarter_4_data))
+summary(glm(M1_retained ~ d1_highlight_created_cap + d1_books_read + d1_reading_mins, data = quarter_4_data))
+
+# D1 Annotations 
+
+summary(glm(M1_retained ~ d1_annotation_made_cap, data = quarter_1_data))
+summary(glm(M1_retained ~ d1_annotation_made_cap + d1_books_read + d1_reading_mins, data = quarter_1_data))
+
+summary(glm(M1_retained ~ d1_annotation_made_cap, data = quarter_2_data))
+summary(glm(M1_retained ~ d1_annotation_made_cap + d1_books_read + d1_reading_mins, data = quarter_2_data))
+
+summary(glm(M1_retained ~ d1_annotation_made_cap, data = quarter_3_data))
+summary(glm(M1_retained ~ d1_annotation_made_cap + d1_books_read + d1_reading_mins, data = quarter_3_data))
+
+summary(glm(M1_retained ~ d1_annotation_made_cap, data = quarter_4_data))
+summary(glm(M1_retained ~ d1_annotation_made_cap + d1_books_read + d1_reading_mins, data = quarter_4_data))
+
+# D1 Book Marks 
+
+summary(glm(M1_retained ~ d1_bookmark_cap, data = quarter_1_data))
+summary(glm(M1_retained ~ d1_bookmark_cap + d1_books_read + d1_reading_mins, data = quarter_1_data))
+
+summary(glm(M1_retained ~ d1_bookmark_cap, data = quarter_2_data))
+summary(glm(M1_retained ~ d1_bookmark_cap + d1_books_read + d1_reading_mins, data = quarter_2_data))
+
+summary(glm(M1_retained ~ d1_bookmark_cap, data = quarter_3_data))
+summary(glm(M1_retained ~ d1_bookmark_cap + d1_books_read + d1_reading_mins, data = quarter_3_data))
+
+summary(glm(M1_retained ~ d1_bookmark_cap, data = quarter_4_data))
+summary(glm(M1_retained ~ d1_bookmark_cap + d1_books_read + d1_reading_mins, data = quarter_4_data))
+
+
+# M1 Retention - Highlights  ------------------------------------------------------------
+
+Data$M1_retained <- as.integer(Data$M1_retained)
+
+Any_Highlight_Use_D1 <- group_by(Data, Highlight_D1_binary) %>% 
+                        summarise(Users = n(), Retained = sum(M1_retained)) %>%
+                        mutate(Percent = 100.0*(Retained / Users))
+
+Any_Highlight_Use_W1 <- group_by(Data, Highlight_W1_binary) %>% 
+                        summarise(Users = n(), Retained = sum(M1_retained)) %>%
+                        mutate(Percent = 100.0*(Retained / Users))
+
+Any_Highlight_Use_W2 <- group_by(Data, Highlight_W2_binary) %>% 
+                        summarise(Users = n(), Retained = sum(M1_retained)) %>%
+                        mutate(Percent = 100.0*(Retained / Users))
+
+Any_Highlight_Use_W3 <- group_by(Data, Highlight_W3_binary) %>% 
+                        summarise(Users = n(), Retained = sum(M1_retained)) %>%
+                        mutate(Percent = 100.0*(Retained / Users))
+
+Any_Highlight_Use_W4 <- group_by(Data, Highlight_W4_binary) %>% 
+                        summarise(Users = n(), Retained = sum(M1_retained)) %>%
+                        mutate(Percent = 100.0*(Retained / Users))
+
+Any_Highlight_Use_m1 <- group_by(Data, Highlight_M1_binary) %>% 
+                        summarise(Users = n(), Retained = sum(M1_retained)) %>%
+                        mutate(Percent = 100.0*(Retained / Users))
+
+rm(Any_Highlight_Use_D1, Any_Highlight_Use_W1, Any_Highlight_Use_W2, Any_Highlight_Use_W3, Any_Highlight_Use_W4, Any_Highlight_Use_m1)
+
+#### annotations 
+
+Any_Annotation_Use_D1 <- group_by(Data, Annotation_D1_binary) %>% 
+  summarise(Users = n(), Retained = sum(M1_retained)) %>%
+  mutate(Percent = 100.0*(Retained / Users))
+
+Any_Annotation_Use_W1 <- group_by(Data, Annotation_W1_binary) %>% 
+  summarise(Users = n(), Retained = sum(M1_retained)) %>%
+  mutate(Percent = 100.0*(Retained / Users))
+
+Any_Annotation_Use_W2 <- group_by(Data, Annotation_W2_binary) %>% 
+  summarise(Users = n(), Retained = sum(M1_retained)) %>%
+  mutate(Percent = 100.0*(Retained / Users))
+
+Any_Annotation_Use_W3 <- group_by(Data, Annotation_W3_binary) %>% 
+  summarise(Users = n(), Retained = sum(M1_retained)) %>%
+  mutate(Percent = 100.0*(Retained / Users))
+
+Any_Annotation_Use_W4 <- group_by(Data, Annotation_W4_binary) %>% 
+  summarise(Users = n(), Retained = sum(M1_retained)) %>%
+  mutate(Percent = 100.0*(Retained / Users))
+
+Any_Annotation_Use_m1 <- group_by(Data, Annotation_M1_binary) %>% 
+  summarise(Users = n(), Retained = sum(M1_retained)) %>%
+  mutate(Percent = 100.0*(Retained / Users))
+
+rm(Any_Annotation_Use_D1, Any_Annotation_Use_W1, Any_Annotation_Use_W2, Any_Annotation_Use_W3, Any_Annotation_Use_W4, Any_Annotation_Use_m1)
+
+# book marks 
+
+Any_Bookmark_Use_D1 <- group_by(Data, Bookmark_D1_binary) %>% 
+  summarise(Users = n(), Retained = sum(M1_retained)) %>%
+  mutate(Percent = 100.0*(Retained / Users))
+
+Any_Bookmark_Use_W1 <- group_by(Data, Bookmark_W1_binary) %>% 
+  summarise(Users = n(), Retained = sum(M1_retained)) %>%
+  mutate(Percent = 100.0*(Retained / Users))
+
+Any_Bookmark_Use_W2 <- group_by(Data, Bookmark_W2_binary) %>% 
+  summarise(Users = n(), Retained = sum(M1_retained)) %>%
+  mutate(Percent = 100.0*(Retained / Users))
+
+Any_Bookmark_Use_W3 <- group_by(Data, Bookmark_W3_binary) %>% 
+  summarise(Users = n(), Retained = sum(M1_retained)) %>%
+  mutate(Percent = 100.0*(Retained / Users))
+
+Any_Bookmark_Use_W4 <- group_by(Data, Bookmark_W4_binary) %>% 
+  summarise(Users = n(), Retained = sum(M1_retained)) %>%
+  mutate(Percent = 100.0*(Retained / Users))
+
+Any_Bookmark_Use_m1 <- group_by(Data, Bookmark_M1_binary) %>% 
+  summarise(Users = n(), Retained = sum(M1_retained)) %>%
+  mutate(Percent = 100.0*(Retained / Users))
+
+### W2 - W4 activity - control books read 
+
+
+summary(glm(M1_retained ~ w2_highlight_created + w2_books_read + w2_reading_mins + w2_annotation_made + w2_bookmark, data = quarter_1_data))
+summary(glm(M1_retained ~ w3_highlight_created + w3_books_read + w3_reading_mins + w3_annotation_made + w3_bookmark, data = quarter_1_data))
+summary(glm(M1_retained ~ w4_highlight_created + w4_books_read + w4_reading_mins + w4_annotation_made + w4_bookmark, data = quarter_1_data))
+
+summary(glm(M1_retained ~ w2_highlight_created + w2_books_read + w2_reading_mins + w2_annotation_made + w2_bookmark, data = quarter_2_data))
+summary(glm(M1_retained ~ w3_highlight_created + w3_books_read + w3_reading_mins + w3_annotation_made + w3_bookmark, data = quarter_2_data))
+summary(glm(M1_retained ~ w4_highlight_created + w4_books_read + w4_reading_mins + w4_annotation_made + w4_bookmark, data = quarter_2_data))
+
+summary(glm(M1_retained ~ w2_highlight_created + w2_books_read + w2_reading_mins + w2_annotation_made + w2_bookmark, data = quarter_3_data))
+summary(glm(M1_retained ~ w3_highlight_created + w3_books_read + w3_reading_mins + w3_annotation_made + w3_bookmark, data = quarter_3_data))
+summary(glm(M1_retained ~ w4_highlight_created + w4_books_read + w4_reading_mins + w4_annotation_made + w4_bookmark, data = quarter_3_data))
+
+# Final Results -M1  ----------------------------------------------------------
+
+library(tidyr)
+
+# D1 Activity 
+
+Any_Highlight_Use_D1 <- group_by(Data, Highlight_D1_binary) %>% 
+                        summarise(Users = n(), Retained = sum(M1_retained)) %>%
+                        mutate(Percent = 100.0*(Retained / Users)) 
+
+Any_Highlight_Use_W1 <- group_by(Data, Highlight_W1_binary) %>% 
+                        summarise(Users = n(), Retained = sum(M1_retained)) %>%
+                        mutate(Percent = 100.0*(Retained / Users))
+
+Any_Highlight_Use_W2 <- group_by(Data, Highlight_W2_binary) %>% 
+                        summarise(Users = n(), Retained = sum(M1_retained)) %>%
+                        mutate(Percent = 100.0*(Retained / Users))
+
+Any_Highlight_Use_W3 <- group_by(Data, Highlight_W3_binary) %>% 
+                        summarise(Users = n(), Retained = sum(M1_retained)) %>%
+                        mutate(Percent = 100.0*(Retained / Users))
+
+Any_Highlight_Use_W4 <- group_by(Data, Highlight_W4_binary) %>% 
+                        summarise(Users = n(), Retained = sum(M1_retained)) %>%
+                        mutate(Percent = 100.0*(Retained / Users)) %>% 
+                        pivot_longer(., cols =  c("Highlight_W4_binary"))
+
+Any_Highlight_Use_M1 <- group_by(Data, Highlight_M1_binary) %>% 
+                        summarise(Users = n(), Retained = sum(M1_retained)) %>%
+                        mutate(Percent = 100.0*(Retained / Users)) %>% 
+                        pivot_longer(., cols =  c("Highlight_M1_binary"))
+
+binary_highlight_combined <-  rbind(Any_Highlight_Use_D1, Any_Highlight_Use_W1, Any_Highlight_Use_W2, Any_Highlight_Use_W3, Any_Highlight_Use_W4,
+      Any_Highlight_Use_M1)
+
+ggplot(binary_highlight_combined, aes(name, Percent, fill = as.factor(value)))+geom_col(position = 'dodge')
+
+# significant test 
+
+prop_a = 0.6358
+prop_b = 0.6622
+
+# Total individuals in each group
+n1 = 7670
+n2 = 1806
+
+# Calculate the number of subscribers in each group
+x1 = round(prop_a * n1)
+x2 = round(prop_b * n2)
+
+# Perform the two-proportion z-test
+prop.test(c(x1, x2), c(n1, n2))
+
+------
+  
+# M1 Activity 
+  
+  Any_Highlight_Use_M1 <- group_by(Data, Highlight_M1_binary) %>% 
+                          summarise(Users = n(), Retained = sum(M1_retained)) %>%
+                          mutate(Percent = 100.0*(Retained / Users))
+  
+Any_Annotation_Use_M1 <- group_by(Data, Annotation_M1_binary) %>% 
+                          summarise(Users = n(), Retained = sum(M1_retained)) %>%
+                          mutate(Percent = 100.0*(Retained / Users))
+    
+Any_Bookmark_Use_M1 <- group_by(Data, Bookmark_M1_binary) %>% 
+                      summarise(Users = n(), Retained = sum(M1_retained)) %>%
+                      mutate(Percent = 100.0*(Retained / Users))
+
+# Number of events - m1 ---------------------------------------------------
+
+
+# number of events - not just binary 
+
+group_by(Data, d1_highlight_created_cap) %>%
+  summarise(Users = n(), Retained = sum(M1_retained)) %>%
+  mutate(Percent = 100.0*(Retained / Users)) %>%
+  ggplot(., aes(d1_highlight_created_cap, Percent))+geom_point()+geom_smooth()
+
+
+# trial vs sub 
+
+Data_trial <- filter(Data, label == 'trial-with-sub')
+Data_no_trial <- filter(Data, label == 'no-trial-only-sub')
+
+
+summary(glm(M1_retained ~ m1_highlight_created + m1_books_read, data = Data_trial))
+
+unique(Data$label)
+
+### m1 activity - number of event activity 
+
+m1_user_highlights <- filter(Data, m1_highlight_created > 0) 
+summary(glm(M1_retained ~ m1_highlight_created, data = m1_user_highlights))
+summary(glm(M1_retained ~ m1_highlight_created, data = Data))
+
+group_by(Data, M1_retained) %>%
+  summarise(avg_high = mean(m1_highlight_created, na.rm = T))
+
+# annotations 
+
+m1_user_annotations <- filter(Data, m1_annotation_made > 0) 
+summary(glm(M1_retained ~ m1_annotation_made, data = Data))
+summary(glm(M1_retained ~ m1_annotation_made, data = m1_user_annotations))
+
+
+summary(glm(M1_retained ~ m1_annotation_made, data = Data_no_trial))
+summary(glm(M1_retained ~ m1_annotation_made, data = Data_trial))
+
+group_by(Data, M1_retained) %>%
+  summarise(avg_high = mean(m1_annotation_made, na.rm = T))
+
+retain <- filter(Data, M1_retained == 1 & m1_annotation_made > 0)
+no_retain <- filter(Data, M1_retained == 0 & m1_annotation_made > 0)
+
+t.test(retain$m1_annotation_made, no_retain$m1_annotation_made)
+
+
+
+# bookmarks
+
+summary(glm(M1_retained ~ m1_bookmark, data = Data))
+summary(glm(M1_retained ~ m1_bookmark, data = Data_no_trial))
+summary(glm(M1_retained ~ m1_bookmark, data = Data_trial))
+
+group_by(Data, M1_retained) %>%
+  summarise(avg_high = mean(m1_bookmark, na.rm = T))
+
+retain <- filter(Data, M1_retained == 1)
+no_retain <- filter(Data, M1_retained == 0)
+
+t.test(retain$m1_bookmark, no_retain$m1_bookmark)
+
+retain_book <- filter(Data, M1_retained == 1 & m1_bookmark > 0)
+no_retain <- filter(Data, M1_retained == 0 & m1_bookmark > 0)
+
+t.test(retain_book$m1_bookmark, no_retain$m1_bookmark)
+
+
+# Export data frame - to be uploaded to Thoughtspot  ----------------------
+
+write.csv(Data, 'Activation_Bet_UGC_Data.csv')
