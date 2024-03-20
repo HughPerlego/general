@@ -1,0 +1,151 @@
+/* Select all of the relvant users from the updated user conversion summary table - once identifed filter to users with a social science academic discipine
+also create time fields to be used as marking notebook events   */
+
+WITH selected_users AS (
+select *, 
+       date_add(day, 1, first_ereader_date) as d1_cutoff,
+       date_add(week, 1, first_ereader_date) as w1_cutoff,
+       date_add(week, 2, first_ereader_date) as w2_cutoff,
+       date_add(week, 3, first_ereader_date) as w3_cutoff,
+       date_add(week, 4, first_ereader_date) as w4_cutoff,
+       date_add(month, 1, first_ereader_date) as m1_cutoff
+FROM (
+SELECT uc.user_id,
+had_trial,
+label,
+subscription_id,
+cancellation_type,
+subscription_rank,
+days_to_cancel,
+plan_group,
+plan_nickname,
+COALESCE(trial_start_time, subscription_start_time) as first_ereader_date,
+subscription_start_time,
+subscription_end_time,
+DATE_TRUNC('month', subscription_start_time) as subscription_start_month,
+tenure_paid_months_todate,
+CASE WHEN tenure_paid_months_todate > 1 THEN 1 ELSE 0 END as M1_retained,
+gbp_paid_value,
+successful_payments,
+gbp_refunded_amount,
+coalesce(d1_academic_discipline, w1_academic_discipline, w2_academic_discipline, 
+         w3_academic_discipline, w4_academic_discipline, m1_academic_discipline, 'Unknown') as combined_academic_discipline,
+
+COALESCE(d1_books_read, 0) as d1_books_read,
+COALESCE(d1_reading_mins, 0) as d1_reading_mins,
+COALESCE(d1_sessions,0) as d1_sessions,
+COALESCE(d1_ereader_sessions,0) as d1_ereader_sessions,
+COALESCE(d1_highlight_created,0) as d1_highlight_created,
+COALESCE(d1_annotation_made,0) as d1_annotation_made,
+COALESCE(d1_book_saved,0) as d1_book_saved,
+COALESCE(d1_bookmark,0) as d1_bookmark,
+
+COALESCE(w1_books_read,0) as w1_books_read,
+COALESCE(w1_reading_mins,0) as w1_reading_mins,
+COALESCE(w1_sessions,0) as w1_sessions,
+COALESCE(w1_ereader_sessions,0) as w1_ereader_sessions,
+COALESCE(w1_highlight_created,0) as w1_highlight_created,
+COALESCE(w1_annotation_made,0) as w1_annotation_made,
+COALESCE(w1_book_saved,0) as w1_book_saved,
+COALESCE(w1_bookmark,0) as w1_bookmark,
+
+COALESCE(w2_books_read,0) as w2_books_read,
+COALESCE(w2_reading_mins,0) as w2_reading_mins,
+COALESCE(w2_sessions,0) as w2_sessions,
+COALESCE(w2_ereader_sessions,0) as w2_ereader_sessions,
+COALESCE(w2_highlight_created,0) as w2_highlight_created,
+COALESCE(w2_annotation_made,0) as w2_annotation_made,
+COALESCE(w2_book_saved,0) as w2_book_saved,
+COALESCE(w2_bookmark,0) as w2_bookmark,
+
+COALESCE(w3_books_read,0) as w3_books_read,
+COALESCE(w3_reading_mins,0) as w3_reading_mins,
+COALESCE(w3_sessions,0) as w3_sessions,
+COALESCE(w3_ereader_sessions,0) as w3_ereader_sessions,
+COALESCE(w3_highlight_created,0) as w3_highlight_created,
+COALESCE(w3_annotation_made,0) as w3_annotation_made,
+COALESCE(w3_book_saved,0) as w3_book_saved,
+COALESCE(w3_bookmark,0) as w3_bookmark,
+
+COALESCE(w4_books_read,0) as w4_books_read,
+COALESCE(w4_reading_mins,0) as w4_reading_mins,
+COALESCE(w4_sessions,0) as w4_sessions,
+COALESCE(w4_ereader_sessions,0) as w4_ereader_sessions,
+COALESCE(w4_highlight_created,0) as w4_highlight_created,
+COALESCE(w4_annotation_made,0) as w4_annotation_made,
+COALESCE(w4_book_saved,0) as w4_book_saved,
+COALESCE(w4_bookmark,0) as w4_bookmark,
+
+COALESCE(m1_books_read,0) as m1_books_read,
+COALESCE(m1_reading_mins,0) as m1_reading_mins,
+COALESCE(m1_sessions,0) as m1_sessions,
+COALESCE(m1_ereader_sessions,0) as m1_ereader_sessions,
+COALESCE(m1_highlight_created,0) as m1_highlight_created ,
+COALESCE(m1_annotation_made,0) as m1_annotation_made,
+COALESCE(m1_book_saved,0) as m1_book_saved,
+COALESCE(m1_bookmark,0) as m1_bookmark
+
+from perlego_reporting_layer.ad_hoc.cn_subscription_summary as uc
+left join perlego_reporting_layer.prod.dim__users as u ON uc.user_id = u.user_id
+left join perlego_reporting_layer.prod.dim__country_regions as c on c.country_id = u.country_id 
+where gbp_paid_value > 0
+and plan_group = 'month'
+and payment_channel = 'direct'
+and user_persona = 'Student' 
+and study_level = 'Bachelor\'s degree'
+and country = 'United States'
+and subscription_rank = 1
+and subscription_start_time > date('2023-01-01') 
+and subscription_start_time < date('2024-02-15')
+and tenure_paid_months_todate > 0
+) 
+),
+
+/* Notebook events - that are within the first month */
+
+user_notebook_events_m1 AS (
+select e.user_id,
+       COUNT(DISTINCT(CASE WHEN event_timestamp <= d1_cutoff THEN event_id ELSE NULL END)) AS d1_notebook_events,
+       COUNT(DISTINCT(CASE WHEN event_timestamp > d1_cutoff AND event_timestamp <= w1_cutoff THEN event_id ELSE NULL END)) AS w1_notebook_events,
+       COUNT(DISTINCT(CASE WHEN event_timestamp > w1_cutoff AND event_timestamp <= w2_cutoff THEN event_id ELSE NULL END)) AS w2_notebook_events,
+       COUNT(DISTINCT(CASE WHEN event_timestamp > w2_cutoff AND event_timestamp <= w3_cutoff THEN event_id ELSE NULL END)) AS w3_notebook_events,
+       COUNT(DISTINCT(CASE WHEN event_timestamp > w3_cutoff AND event_timestamp <= w4_cutoff THEN event_id ELSE NULL END)) AS w4_notebook_events,
+       COUNT(DISTINCT(CASE WHEN event_timestamp <= m1_cutoff THEN event_id ELSE NULL END)) AS m1_notebook_events
+from perlego_reporting_layer.prod.fct__events as e 
+inner join selected_users on selected_users.user_id = e.user_id  
+where event_name in ('notebook highlight copied', 'notebook annotation copied',
+                     'notebook highlight note edited', 'notebook highlight navigation')
+group by e.user_id),
+
+/* Combine tables & add in difference columns  */
+Combined_table AS (
+SELECT selected_users.*, 
+       coalesce(d1_notebook_events,0) as d1_notebook_events,
+       coalesce(w1_notebook_events,0) as w1_notebook_events,
+       coalesce(w2_notebook_events,0) as w2_notebook_events,
+       coalesce(w3_notebook_events,0) as w3_notebook_events,
+       coalesce(w4_notebook_events,0) as w4_notebook_events,
+
+       w2_books_read- w1_books_read as w1_w2_change_books_read,
+       w3_books_read- w2_books_read as w2_w3_change_books_read,
+       w4_books_read- w3_books_read as w3_w4_change_books_read,
+
+       w2_highlight_created- w1_highlight_created as w1_w2_change_highlight_created,
+       w3_highlight_created- w2_highlight_created as w2_w3_change_highlight_created,
+       w4_highlight_created- w3_highlight_created as w3_w4_change_highlight_created,
+
+       w2_annotation_made- w1_annotation_made as w1_w2_change_annotation_made,
+       w3_annotation_made- w2_annotation_made as w2_w3_change_annotation_made,
+       w4_annotation_made- w3_annotation_made as w3_w4_change_annotation_made,
+
+       w2_bookmark- w1_bookmark as w1_w2_change_bookmark,
+       w3_bookmark- w2_bookmark as w2_w3_change_bookmark,
+       w4_bookmark- w3_bookmark as w3_w4_change_bookmark
+
+FROM selected_users 
+LEFT JOIN user_notebook_events_m1 ON selected_users.user_id = user_notebook_events_m1.user_id 
+)
+
+
+select *
+from Combined_table
